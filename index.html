@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#14161b" />
+<title>RBシグナル(コア版)</title>
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="page">
+
+    <header class="topbar">
+      <div class="topbar-title">
+        <span class="eyebrow">GBPJPY・GBPUSD・USDJPY / コア版</span>
+        <h1>RBシグナル</h1>
+      </div>
+      <button id="themeToggle" class="icon-btn" aria-label="テーマ切替" type="button">◐</button>
+    </header>
+
+    <p class="disclaimer">
+      日足RideThin(5トランシェ)＋週足ドンチャン(3階層)のみを実装したコア版です。
+      rideサーキットブレーカーや他9つの分散レイヤーは未実装(フェーズ2予定)。
+      売買を代行・自動発注する機能はありません。表示された内容は必ず自分の判断で確認してから発注してください。
+    </p>
+
+    <section class="card settings-card">
+      <button id="settingsToggle" class="settings-summary" type="button" aria-expanded="false">
+        <span>設定</span>
+        <span id="settingsChevron" class="chevron">&rsaquo;</span>
+      </button>
+      <div id="settingsBody" class="settings-body hidden">
+        <label class="field">
+          <span>Twelve Data APIキー</span>
+          <input id="apiKey" type="text" placeholder="無料登録して取得したキーを貼り付け" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span>運用資金(円)</span>
+          <input id="capitalJpy" type="number" inputmode="numeric" value="3000000" min="0" step="10000" />
+        </label>
+        <label class="field">
+          <span>DD許容度(%)</span>
+          <input id="ddPct" type="number" inputmode="numeric" value="20" min="1" max="90" step="1" />
+        </label>
+        <label class="field">
+          <span>USD/JPYレート(概算)</span>
+          <input id="usdJpy" type="number" inputmode="decimal" value="150" min="1" step="0.5" />
+        </label>
+        <p class="field-note">
+          ロット計算は「年間利益÷最大DD比率」方式(教訓27)。基準最大DD $2,510.22(実データ)を、
+          運用資金×DD許容度から逆算したUSD建てDD予算でスケーリングします。
+        </p>
+        <button id="saveSettings" class="btn btn-secondary" type="button">設定を保存</button>
+        <span id="settingsSaved" class="saved-flag hidden">保存しました</span>
+      </div>
+    </section>
+
+    <button id="fetchBtn" class="btn btn-primary btn-large" type="button">
+      本日の判定を取得
+    </button>
+    <p id="fetchStatus" class="fetch-status"></p>
+
+    <section id="signalsSection" class="hidden">
+      <h2>本日の新規シグナル</h2>
+      <div id="signalCards" class="stack"></div>
+    </section>
+
+    <section id="positionsSection">
+      <div class="section-head">
+        <h2>保有中トランシェ</h2>
+        <button id="addPositionBtn" class="btn btn-ghost btn-small" type="button">＋ 手動で追加</button>
+      </div>
+      <p class="section-note">シグナルが出た日に実際の約定価格を記録すると、翌朝から目標・撤退ラインが自動更新されます。</p>
+      <div id="positionCards" class="stack"></div>
+      <p id="noPositions" class="empty-note">保有中のトランシェはまだ記録されていません。</p>
+    </section>
+
+  </div>
+
+  <div id="entryModal" class="modal hidden">
+    <div class="modal-box">
+      <h3 id="entryModalTitle">エントリーを記録</h3>
+      <label class="field">
+        <span>実際の約定価格</span>
+        <input id="entryPriceInput" type="number" inputmode="decimal" step="0.001" />
+      </label>
+      <div class="modal-actions">
+        <button id="entryModalCancel" class="btn btn-ghost" type="button">キャンセル</button>
+        <button id="entryModalConfirm" class="btn btn-primary" type="button">記録する</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
