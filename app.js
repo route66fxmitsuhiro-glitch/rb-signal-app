@@ -80,8 +80,16 @@ function weekKeyOf(dateStr) {
   return ymd(d);
 }
 
+// 「今日」はUTCではなく端末のローカル日付で判定する(JSTユーザーが朝チェックする
+// 運用を想定。ymd()はUTC変換のため、todayStr()だけは別実装にする — 修正前は
+// UTC日付を使っていたため、JSTの朝〜午前9時台は「今日」がまだ前日のまま判定され、
+// 月曜の朝に週境界の判定がずれるバグがあった)
 function todayStr() {
-  return ymd(new Date());
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
 // ========== Twelve Data 取得 ==========
@@ -133,29 +141,38 @@ function computeATR14(bars) {
   return last14.reduce((a, b) => a + b, 0) / last14.length;
 }
 
-// 直近2本の完成バーからN=1ブレイクアウト方向を判定(アウトサイドデイは陽線/陰線で一本化)
+// 直近2本の完成バーからN=1ブレイクアウト方向を判定。
+// 高値・安値を両方同時に更新した場合(アウトサイド)は陽線/陰線で一本化する
+// (=「高値を更新したから単純にロング」にはならない点に注意。outsideフラグを
+// 呼び出し側に返すのでUIに理由を表示できるようにする)。
 function breakoutDirection(prevPrev, prev) {
   const brokeHigh = prev.high > prevPrev.high;
   const brokeLow = prev.low < prevPrev.low;
+  let direction = null;
   if (brokeHigh && brokeLow) {
-    return prev.close >= prev.open ? "long" : "short"; // アウトサイドデイ
+    direction = prev.close >= prev.open ? "long" : "short";
+  } else if (brokeHigh) {
+    direction = "long";
+  } else if (brokeLow) {
+    direction = "short";
   }
-  if (brokeHigh) return "long";
-  if (brokeLow) return "short";
-  return null;
+  return { direction, outside: brokeHigh && brokeLow, brokeHigh, brokeLow };
 }
 
 function computeDailySignal(bars) {
   if (bars.length < 2) return null;
   const prev = bars[bars.length - 1];
   const prevPrev = bars[bars.length - 2];
-  const direction = breakoutDirection(prevPrev, prev);
-  if (!direction) return null;
+  const res = breakoutDirection(prevPrev, prev);
+  if (!res.direction) return null;
   return {
-    direction,
+    direction: res.direction,
+    outside: res.outside,
+    prevBar: prev,
+    prevPrevBar: prevPrev,
     referenceDate: prev.date,
     // 参考値: 当日の逆指値(反対ブレイク水準)は直近完成バーの安値/高値
-    todayStopTrigger: direction === "long" ? prev.low : prev.high,
+    todayStopTrigger: res.direction === "long" ? prev.low : prev.high,
   };
 }
 
@@ -188,12 +205,15 @@ function computeWeeklySignal(weeklyBars) {
   if (weeklyBars.length < 2) return null;
   const prev = weeklyBars[weeklyBars.length - 1];
   const prevPrev = weeklyBars[weeklyBars.length - 2];
-  const direction = breakoutDirection(prevPrev, prev);
-  if (!direction) return null;
+  const res = breakoutDirection(prevPrev, prev);
+  if (!res.direction) return null;
   return {
-    direction,
+    direction: res.direction,
+    outside: res.outside,
+    prevWeek: prev,
+    prevPrevWeek: prevPrev,
     referenceWeek: prev.weekKey,
-    todayStopTrigger: direction === "long" ? prev.low : prev.high,
+    todayStopTrigger: res.direction === "long" ? prev.low : prev.high,
   };
 }
 
@@ -311,7 +331,13 @@ function renderSignals(results) {
       html += `
         <div class="pair-meta">
           <span class="badge ${badge}">日足 ${sig.direction === "long" ? "ロング" : "ショート"}</span>
+          ${sig.outside ? '<span class="badge warn">アウトサイド(前日終値で一本化)</span>' : ""}
           ATR14=${fmtPrice(r.daily.atr14, 3)} (R)
+        </div>
+        <div class="pair-meta">
+          判定根拠: 前々日 高${fmtPrice(sig.prevPrevBar.high)}/安${fmtPrice(sig.prevPrevBar.low)}
+          → 前日 高${fmtPrice(sig.prevBar.high)}/安${fmtPrice(sig.prevBar.low)}(${sig.prevBar.date}、
+          ${sig.prevBar.close >= sig.prevBar.open ? "陽線" : "陰線"})
         </div>
         <table class="tranche-table">
           <thead><tr><th>枠</th><th>ロット</th><th>目標(pips)</th><th>初期逆指値目安</th></tr></thead>
@@ -347,7 +373,13 @@ function renderSignals(results) {
       html += `
         <div class="pair-meta" style="margin-top:10px;">
           <span class="badge ${badge}">週足 ${sig.direction === "long" ? "ロング" : "ショート"}(月曜のみ新規判定)</span>
+          ${sig.outside ? '<span class="badge warn">アウトサイド週(前週終値で一本化)</span>' : ""}
           R(概算・先週レンジ幅)=${fmtPrice(rApprox, 3)}
+        </div>
+        <div class="pair-meta">
+          判定根拠: 前々週(${sig.prevPrevWeek.weekKey}週) 高${fmtPrice(sig.prevPrevWeek.high)}/安${fmtPrice(sig.prevPrevWeek.low)}
+          → 前週(${sig.prevWeek.weekKey}週) 高${fmtPrice(sig.prevWeek.high)}/安${fmtPrice(sig.prevWeek.low)}
+          (${sig.prevWeek.close >= sig.prevWeek.open ? "陽線" : "陰線"})
         </div>
         <table class="tranche-table">
           <thead><tr><th>枠</th><th>ロット</th><th>目標(pips目安)</th><th>撤退ライン</th></tr></thead>
