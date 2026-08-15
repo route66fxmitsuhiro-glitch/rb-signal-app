@@ -176,7 +176,15 @@ function computeDailySignal(bars) {
   };
 }
 
-// 日足バーを月曜始まりの週足に集計。「今日を含む週」は未完成として除外する。
+// 土日は「取引中の週」が存在しない(FXは月〜金しか動かない)ため、直近の月〜金の
+// 週は既に完結しているとみなしてよい。平日(月〜金)だけを「まだ進行中かもしれない週」
+// の判定対象にする。
+function isWeekdayLocal() {
+  const day = new Date().getDay(); // 0=日,6=土(ローカル)
+  return day >= 1 && day <= 5;
+}
+
+// 日足バーを月曜始まりの週足に集計。「今日を含む週」が平日進行中の場合のみ未完成として除外する。
 function aggregateWeekly(dailyBars) {
   const groups = new Map();
   for (const b of dailyBars) {
@@ -184,7 +192,9 @@ function aggregateWeekly(dailyBars) {
     if (!groups.has(wk)) groups.set(wk, []);
     groups.get(wk).push(b);
   }
-  const currentWeekKey = weekKeyOf(todayStr());
+  // 土日にチェックした場合、直前の月〜金の週は既に終わっているのでcurrentWeekKeyはnull
+  // (=除外対象なし)にする。平日にチェックした場合のみ、今週を進行中として除外する。
+  const currentWeekKey = isWeekdayLocal() ? weekKeyOf(todayStr()) : null;
   const weeks = [];
   for (const [wk, arr] of groups.entries()) {
     if (wk === currentWeekKey) continue; // 進行中の週は除外
