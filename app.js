@@ -413,6 +413,14 @@ function fmtPips(v, symbol) {
   return (v / pipSize).toFixed(1);
 }
 
+// 内部計算は標準ロット単位(1.0=100,000通貨)のまま行い、表示だけ「枚」
+// (1枚=10,000通貨、GMOクリック証券のFXネオ等の単位)に変換する。
+// 1ロット=10枚、EAのRoundLot()の0.01ロット刻み=0.1枚刻みに相当。
+const MAI_PER_LOT = 10;
+function fmtMai(lot) {
+  return (lot * MAI_PER_LOT).toFixed(1);
+}
+
 // 暦の上ではもう金曜まで終わっているがEAではまだ確定していない週がある
 // 場合(主に月曜〜火曜朝)、その週を使った場合の参考プレビューをHTMLで返す。
 // なければ空文字。
@@ -465,7 +473,7 @@ function renderSignals(results) {
           ${dsig.prevBar.close >= dsig.prevBar.open ? "陽線" : "陰線"})
         </div>
         <table class="tranche-table">
-          <thead><tr><th>枠</th><th>ロット</th><th>目標(pips)</th><th>初期逆指値目安</th></tr></thead>
+          <thead><tr><th>枠</th><th>枚数</th><th>目標(pips)</th><th>初期逆指値目安</th></tr></thead>
           <tbody>
             ${tranches
               .map((t) => {
@@ -473,7 +481,7 @@ function renderSignals(results) {
                 const stopNote = t.hardStopR
                   ? `${fmtPrice(dsig.todayStopTrigger)} / -1.0R`
                   : fmtPrice(dsig.todayStopTrigger);
-                return `<tr><td>${t.name}</td><td>${t.lot.toFixed(2)}</td><td>${offPips}</td><td>${stopNote}</td></tr>`;
+                return `<tr><td>${t.name}</td><td>${fmtMai(t.lot)}枚</td><td>${offPips}</td><td>${stopNote}</td></tr>`;
               })
               .join("")}
           </tbody>
@@ -531,12 +539,12 @@ function renderSignals(results) {
           (${wsig.prevWeek.close >= wsig.prevWeek.open ? "陽線" : "陰線"})
         </div>
         <table class="tranche-table">
-          <thead><tr><th>枠</th><th>ロット</th><th>目標(pips目安)</th><th>撤退ライン</th></tr></thead>
+          <thead><tr><th>枠</th><th>枚数</th><th>目標(pips目安)</th><th>撤退ライン</th></tr></thead>
           <tbody>
             ${tranches
               .map((t) => {
                 const offPips = t.targetR != null ? fmtPips(rApprox * t.targetR, r.symbol) : "なし(ride)";
-                return `<tr><td>${t.name}</td><td>${t.lot.toFixed(2)}</td><td>${offPips}</td><td>${fmtPrice(wsig.todayStopTrigger)}</td></tr>`;
+                return `<tr><td>${t.name}</td><td>${fmtMai(t.lot)}枚</td><td>${offPips}</td><td>${fmtPrice(wsig.todayStopTrigger)}</td></tr>`;
               })
               .join("")}
           </tbody>
@@ -613,7 +621,7 @@ function renderPositions(freshDataBySymbol) {
       <div class="pair-meta">エントリー ${pos.entryDate} @ ${fmtPrice(pos.entryPrice)} / R=${fmtPrice(pos.R)}</div>
       <div class="pair-meta">現在の撤退ライン: <strong>${fmtPrice(exit.price)}</strong>(${exit.source})</div>
       <table class="tranche-table">
-        <thead><tr><th>枠</th><th>ロット</th><th>目標</th><th>済</th></tr></thead>
+        <thead><tr><th>枠</th><th>枚数</th><th>目標</th><th>済</th></tr></thead>
         <tbody>
     `;
     for (const t of pos.tranches) {
@@ -621,7 +629,7 @@ function renderPositions(freshDataBySymbol) {
       const rowClass = t.closed ? "closed" : "";
       html += `<tr class="${rowClass}">
         <td>${t.name}</td>
-        <td>${t.lot.toFixed(2)}</td>
+        <td>${fmtMai(t.lot)}枚</td>
         <td>${tp != null ? fmtPrice(tp) : "なし(反対ブレイクのみ)"}</td>
         <td><input type="checkbox" class="close-toggle" data-pos="${pos.id}" data-tranche="${t.name}" ${t.closed ? "checked" : ""} /></td>
       </tr>`;
