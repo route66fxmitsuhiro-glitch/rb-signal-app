@@ -258,9 +258,9 @@ function lastCompleteBarIsMonday(dailyBars) {
   return dowOf(last.date) === 1; // 1=月曜
 }
 
-// 日足バーを月曜始まりの週足に集計する。直近の週グループ(まだ月曜の足
-// しか無い、または金曜まで揃っていても翌週月曜の足がまだ確定していない
-// week)は、EAの確定タイミングに合わせて常に除外する。
+// 日足バーを月曜始まりの週足に集計する。全ての週グループをそのまま返す
+// (「EA確定済みの週」と「まだ確定していないが暦の上では完結している週」を
+// 呼び出し側で使い分けられるようにするため)。
 function aggregateWeekly(dailyBars) {
   const groups = new Map();
   for (const b of dailyBars) {
@@ -271,19 +271,37 @@ function aggregateWeekly(dailyBars) {
   const weeks = [];
   for (const [wk, arr] of groups.entries()) {
     arr.sort((a, b) => (a.date < b.date ? -1 : 1));
+    const lastDay = arr[arr.length - 1];
     weeks.push({
       weekKey: wk,
       open: arr[0].open,
       high: Math.max(...arr.map((x) => x.high)),
       low: Math.min(...arr.map((x) => x.low)),
       close: arr[arr.length - 1].close,
+      lastDayDow: dowOf(lastDay.date), // 暦の上でこの週が金曜まで埋まっているか判定用
     });
   }
   weeks.sort((a, b) => (a.weekKey < b.weekKey ? -1 : 1));
-  // 最新の週グループ(進行中、または月曜の足だけがまだ確定した直後)は
-  // 常に「未確定」として比較対象から除外する。これによりEAと同じく
-  // 「直近の完成2週」を正しく取り出せる(月曜/火曜かによらず一貫した規則)。
-  return weeks.length > 0 ? weeks.slice(0, -1) : weeks;
+  return weeks;
+}
+
+// EAが実際に使う「確定済みの週」だけを取り出す(直近1週グループは常に
+// 未確定として除外。月曜の足しかない/金曜まで揃っているが翌週月曜の足が
+// まだ来ていない、いずれの場合も同じ扱い)。
+function officialWeeks(allWeeks) {
+  return allWeeks.length > 0 ? allWeeks.slice(0, -1) : allWeeks;
+}
+
+// 「暦の上ではもう金曜まで終わっているが、EAはまだ確定として扱っていない」
+// 週がある場合だけ、その週を使った参考プレビュー用の配列を返す(なければnull)。
+// 月曜〜次の火曜の朝までの間だけこのプレビューが意味を持つ。
+function previewWeeks(allWeeks) {
+  if (allWeeks.length < 2) return null;
+  const latest = allWeeks[allWeeks.length - 1];
+  if (latest.lastDayDow !== 5) return null; // 金曜まで埋まっていなければプレビュー対象外
+  const official = officialWeeks(allWeeks);
+  if (official.length > 0 && official[official.length - 1].weekKey === latest.weekKey) return null;
+  return allWeeks; // 末尾を落とさずそのまま返す(=直近の暦完結週を含む)
 }
 
 // シグナルの有無にかかわらず、必ず判定根拠(前々週/前週の高安)を含めて返す。
@@ -393,6 +411,24 @@ function fmtPips(v, symbol) {
   const isJpy = symbol.endsWith("JPY") || symbol.endsWith("/JPY");
   const pipSize = isJpy ? 0.01 : 0.0001;
   return (v / pipSize).toFixed(1);
+}
+
+// 暦の上ではもう金曜まで終わっているがEAではまだ確定していない週がある
+// 場合(主に月曜〜火曜朝)、その週を使った場合の参考プレビューをHTMLで返す。
+// なければ空文字。
+function renderWeeklyPreview(previewSignal, symbol) {
+  if (!previewSignal || !previewSignal.direction) return "";
+  const badge = previewSignal.direction === "long" ? "long" : "short";
+  return `
+    <div class="pair-meta">
+      <span class="badge ${badge}">参考プレビュー: ${previewSignal.direction === "long" ? "ロング" : "ショート"}</span>
+      (直近の暦完結週を含めた場合。まだEA未確定、火曜になれば正式判定に切り替わる)
+    </div>
+    <div class="pair-meta">
+      根拠: 前々週(${previewSignal.prevPrevWeek.weekKey}週) 高${fmtPrice(previewSignal.prevPrevWeek.high)}/安${fmtPrice(previewSignal.prevPrevWeek.low)}
+      → 前週(${previewSignal.prevWeek.weekKey}週) 高${fmtPrice(previewSignal.prevWeek.high)}/安${fmtPrice(previewSignal.prevWeek.low)}
+    </div>
+  `;
 }
 
 function renderSignals(results) {
@@ -516,6 +552,7 @@ function renderSignals(results) {
                まだなら次の月曜明け(通常火曜)を待ってください。</p>`
         }
       `;
+      html += renderWeeklyPreview(r.weekly.previewSignal, r.symbol);
     } else if (wsig) {
       const isNewToday = lastCompleteBarIsMonday(r.daily.bars);
       html += `
@@ -529,6 +566,7 @@ function renderSignals(results) {
           (高値更新: ${wsig.brokeHigh ? "○" : "×"} / 安値更新: ${wsig.brokeLow ? "○" : "×"})
         </div>
       `;
+      html += renderWeeklyPreview(r.weekly.previewSignal, r.symbol);
     }
 
     card.innerHTML = html;
@@ -718,13 +756,18 @@ async function fetchAndRender() {
       const bars = await fetchDailyBars(p.symbol, s.apiKey);
       const atr14 = computeATR14(bars);
       const dailySignal = computeDailySignal(bars);
-      const weeklyBars = aggregateWeekly(bars);
+      const allWeeklyBars = aggregateWeekly(bars);
+      const weeklyBars = officialWeeks(allWeeklyBars);
       const weeklySignal = computeWeeklySignal(weeklyBars);
+      // 暦の上ではもう金曜まで終わっているがEAはまだ確定として扱っていない
+      // 週がある場合(月曜〜火曜朝によくある)、参考プレビューも計算する。
+      const pvWeeks = previewWeeks(allWeeklyBars);
+      const previewSignal = pvWeeks ? computeWeeklySignal(pvWeeks) : null;
       const r = {
         symbol: p.symbol,
         label: p.label,
         daily: { bars, atr14, signal: dailySignal },
-        weekly: { bars: weeklyBars, signal: weeklySignal },
+        weekly: { bars: weeklyBars, signal: weeklySignal, previewSignal },
       };
       results.push(r);
       freshBySymbol[p.symbol] = r;

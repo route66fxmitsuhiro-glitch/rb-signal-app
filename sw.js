@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v9"; // v9: ロット基準DDをコア単体の実データ(3369.33)に修正(app.js更新)
+const CACHE_NAME = "rb-signal-shell-v10"; // v10: 月〜火曜朝に未確定週の参考プレビューを追加(app.js更新)
 const SHELL_FILES = [
   "./",
   "./index.html",
