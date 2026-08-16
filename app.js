@@ -159,12 +159,15 @@ function breakoutDirection(prevPrev, prev) {
   return { direction, outside: brokeHigh && brokeLow, brokeHigh, brokeLow };
 }
 
+// シグナルの有無にかかわらず、必ず判定根拠(前々日/前日の高安)を含めて返す。
+// direction:null は「シグナルなし」(=アプリが正常に動いた上での結論)を意味する。
 function computeDailySignal(bars) {
-  if (bars.length < 2) return null;
+  if (bars.length < 2) {
+    return { direction: null, insufficientData: true };
+  }
   const prev = bars[bars.length - 1];
   const prevPrev = bars[bars.length - 2];
   const res = breakoutDirection(prevPrev, prev);
-  if (!res.direction) return null;
   return {
     direction: res.direction,
     outside: res.outside,
@@ -172,7 +175,7 @@ function computeDailySignal(bars) {
     prevPrevBar: prevPrev,
     referenceDate: prev.date,
     // 参考値: 当日の逆指値(反対ブレイク水準)は直近完成バーの安値/高値
-    todayStopTrigger: res.direction === "long" ? prev.low : prev.high,
+    todayStopTrigger: res.direction ? (res.direction === "long" ? prev.low : prev.high) : null,
   };
 }
 
@@ -211,19 +214,21 @@ function aggregateWeekly(dailyBars) {
   return weeks;
 }
 
+// シグナルの有無にかかわらず、必ず判定根拠(前々週/前週の高安)を含めて返す。
 function computeWeeklySignal(weeklyBars) {
-  if (weeklyBars.length < 2) return null;
+  if (weeklyBars.length < 2) {
+    return { direction: null, insufficientData: true };
+  }
   const prev = weeklyBars[weeklyBars.length - 1];
   const prevPrev = weeklyBars[weeklyBars.length - 2];
   const res = breakoutDirection(prevPrev, prev);
-  if (!res.direction) return null;
   return {
     direction: res.direction,
     outside: res.outside,
     prevWeek: prev,
     prevPrevWeek: prevPrev,
     referenceWeek: prev.weekKey,
-    todayStopTrigger: res.direction === "long" ? prev.low : prev.high,
+    todayStopTrigger: res.direction ? (res.direction === "long" ? prev.low : prev.high) : null,
   };
 }
 
@@ -319,35 +324,34 @@ function renderSignals(results) {
   const section = document.getElementById("signalsSection");
   const container = document.getElementById("signalCards");
   container.innerHTML = "";
-  const withSignal = results.filter((r) => r.daily.signal || r.weekly.signal);
-  if (withSignal.length === 0) {
-    section.classList.add("hidden");
-    return;
-  }
+  // シグナルの有無にかかわらず、必ず全ペアを表示する(「シグナルなし」も
+  // アプリが正常に動いた結果であることが見えるようにするため)。
   section.classList.remove("hidden");
 
   for (const r of results) {
-    if (!r.daily.signal && !r.weekly.signal) continue;
     const card = document.createElement("div");
     card.className = "pair-card";
 
     let html = `<div class="pair-head"><span class="pair-name">${r.label}</span></div>`;
 
-    if (r.daily.signal) {
-      const sig = r.daily.signal;
-      const badge = sig.direction === "long" ? "long" : "short";
+    // --- 日足 ---
+    const dsig = r.daily.signal;
+    if (dsig && dsig.insufficientData) {
+      html += `<div class="pair-meta">日足: <span class="badge none">データ不足</span></div>`;
+    } else if (dsig && dsig.direction) {
+      const badge = dsig.direction === "long" ? "long" : "short";
       const scale = lotScaleFactor(state.settings);
       const tranches = tranchesWithLots(DAILY_TRANCHES, BASE_LOT_DAILY, scale);
       html += `
         <div class="pair-meta">
-          <span class="badge ${badge}">日足 ${sig.direction === "long" ? "ロング" : "ショート"}</span>
-          ${sig.outside ? '<span class="badge warn">アウトサイド(前日終値で一本化)</span>' : ""}
+          <span class="badge ${badge}">日足 ${dsig.direction === "long" ? "ロング" : "ショート"}</span>
+          ${dsig.outside ? '<span class="badge warn">アウトサイド(前日終値で一本化)</span>' : ""}
           ATR14=${fmtPrice(r.daily.atr14, 3)} (R)
         </div>
         <div class="pair-meta">
-          判定根拠: 前々日 高${fmtPrice(sig.prevPrevBar.high)}/安${fmtPrice(sig.prevPrevBar.low)}
-          → 前日 高${fmtPrice(sig.prevBar.high)}/安${fmtPrice(sig.prevBar.low)}(${sig.prevBar.date}、
-          ${sig.prevBar.close >= sig.prevBar.open ? "陽線" : "陰線"})
+          判定根拠: 前々日 高${fmtPrice(dsig.prevPrevBar.high)}/安${fmtPrice(dsig.prevPrevBar.low)}
+          → 前日 高${fmtPrice(dsig.prevBar.high)}/安${fmtPrice(dsig.prevBar.low)}(${dsig.prevBar.date}、
+          ${dsig.prevBar.close >= dsig.prevBar.open ? "陽線" : "陰線"})
         </div>
         <table class="tranche-table">
           <thead><tr><th>枠</th><th>ロット</th><th>目標(pips)</th><th>初期逆指値目安</th></tr></thead>
@@ -356,8 +360,8 @@ function renderSignals(results) {
               .map((t) => {
                 const offPips = t.targetR != null ? fmtPips(r.daily.atr14 * t.targetR, r.symbol) : "なし(ride)";
                 const stopNote = t.hardStopR
-                  ? `${fmtPrice(sig.todayStopTrigger)} / -1.0R`
-                  : fmtPrice(sig.todayStopTrigger);
+                  ? `${fmtPrice(dsig.todayStopTrigger)} / -1.0R`
+                  : fmtPrice(dsig.todayStopTrigger);
                 return `<tr><td>${t.name}</td><td>${t.lot.toFixed(2)}</td><td>${offPips}</td><td>${stopNote}</td></tr>`;
               })
               .join("")}
@@ -365,31 +369,45 @@ function renderSignals(results) {
         </table>
         <p class="section-note">エントリー(今日の始値)後、実際の約定価格を「保有中トランシェ」に記録してください。</p>
         <button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
-          data-timeframe="daily" data-direction="${sig.direction}" data-atr="${r.daily.atr14}">
+          data-timeframe="daily" data-direction="${dsig.direction}" data-atr="${r.daily.atr14}">
           このシグナルを記録
         </button>
       `;
+    } else if (dsig) {
+      html += `
+        <div class="pair-meta">
+          日足: <span class="badge none">本日シグナルなし</span>
+        </div>
+        <div class="pair-meta">
+          判定根拠: 前々日 高${fmtPrice(dsig.prevPrevBar.high)}/安${fmtPrice(dsig.prevPrevBar.low)}
+          → 前日 高${fmtPrice(dsig.prevBar.high)}/安${fmtPrice(dsig.prevBar.low)}(${dsig.prevBar.date}、
+          高値更新: ${dsig.brokeHigh ? "○" : "×"} / 安値更新: ${dsig.brokeLow ? "○" : "×"})
+        </div>
+      `;
     }
 
-    if (r.weekly.signal) {
-      const sig = r.weekly.signal;
-      const badge = sig.direction === "long" ? "long" : "short";
+    // --- 週足 ---
+    const wsig = r.weekly.signal;
+    if (wsig && wsig.insufficientData) {
+      html += `<div class="pair-meta" style="margin-top:10px;">週足: <span class="badge none">データ不足</span></div>`;
+    } else if (wsig && wsig.direction) {
+      const badge = wsig.direction === "long" ? "long" : "short";
       const scale = lotScaleFactor(state.settings);
       const tranches = tranchesWithLots(WEEKLY_TRANCHES, BASE_LOT_WEEKLY, scale);
       const lastWeek = r.weekly.bars[r.weekly.bars.length - 1];
-      const oppositeExtreme = sig.direction === "long" ? lastWeek.low : lastWeek.high;
-      const breakoutLevel = sig.direction === "long" ? lastWeek.high : lastWeek.low;
+      const oppositeExtreme = wsig.direction === "long" ? lastWeek.low : lastWeek.high;
+      const breakoutLevel = wsig.direction === "long" ? lastWeek.high : lastWeek.low;
       const rApprox = Math.abs(breakoutLevel - oppositeExtreme);
       html += `
         <div class="pair-meta" style="margin-top:10px;">
-          <span class="badge ${badge}">週足 ${sig.direction === "long" ? "ロング" : "ショート"}(月曜のみ新規判定)</span>
-          ${sig.outside ? '<span class="badge warn">アウトサイド週(前週終値で一本化)</span>' : ""}
+          <span class="badge ${badge}">週足 ${wsig.direction === "long" ? "ロング" : "ショート"}(月曜のみ新規判定)</span>
+          ${wsig.outside ? '<span class="badge warn">アウトサイド週(前週終値で一本化)</span>' : ""}
           R(概算・先週レンジ幅)=${fmtPrice(rApprox, 3)}
         </div>
         <div class="pair-meta">
-          判定根拠: 前々週(${sig.prevPrevWeek.weekKey}週) 高${fmtPrice(sig.prevPrevWeek.high)}/安${fmtPrice(sig.prevPrevWeek.low)}
-          → 前週(${sig.prevWeek.weekKey}週) 高${fmtPrice(sig.prevWeek.high)}/安${fmtPrice(sig.prevWeek.low)}
-          (${sig.prevWeek.close >= sig.prevWeek.open ? "陽線" : "陰線"})
+          判定根拠: 前々週(${wsig.prevPrevWeek.weekKey}週) 高${fmtPrice(wsig.prevPrevWeek.high)}/安${fmtPrice(wsig.prevPrevWeek.low)}
+          → 前週(${wsig.prevWeek.weekKey}週) 高${fmtPrice(wsig.prevWeek.high)}/安${fmtPrice(wsig.prevWeek.low)}
+          (${wsig.prevWeek.close >= wsig.prevWeek.open ? "陽線" : "陰線"})
         </div>
         <table class="tranche-table">
           <thead><tr><th>枠</th><th>ロット</th><th>目標(pips目安)</th><th>撤退ライン</th></tr></thead>
@@ -397,15 +415,27 @@ function renderSignals(results) {
             ${tranches
               .map((t) => {
                 const offPips = t.targetR != null ? fmtPips(rApprox * t.targetR, r.symbol) : "なし(ride)";
-                return `<tr><td>${t.name}</td><td>${t.lot.toFixed(2)}</td><td>${offPips}</td><td>${fmtPrice(sig.todayStopTrigger)}</td></tr>`;
+                return `<tr><td>${t.name}</td><td>${t.lot.toFixed(2)}</td><td>${offPips}</td><td>${fmtPrice(wsig.todayStopTrigger)}</td></tr>`;
               })
               .join("")}
           </tbody>
         </table>
         <button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
-          data-timeframe="weekly" data-direction="${sig.direction}" data-r="${rApprox}">
+          data-timeframe="weekly" data-direction="${wsig.direction}" data-r="${rApprox}">
           このシグナルを記録
         </button>
+      `;
+    } else if (wsig) {
+      html += `
+        <div class="pair-meta" style="margin-top:10px;">
+          週足: <span class="badge none">今週シグナルなし</span>
+          ${isWeekdayLocal() ? "" : '<span class="badge warn">今日は週末(直近の月〜金の週で判定)</span>'}
+        </div>
+        <div class="pair-meta">
+          判定根拠: 前々週(${wsig.prevPrevWeek.weekKey}週) 高${fmtPrice(wsig.prevPrevWeek.high)}/安${fmtPrice(wsig.prevPrevWeek.low)}
+          → 前週(${wsig.prevWeek.weekKey}週) 高${fmtPrice(wsig.prevWeek.high)}/安${fmtPrice(wsig.prevWeek.low)}
+          (高値更新: ${wsig.brokeHigh ? "○" : "×"} / 安値更新: ${wsig.brokeLow ? "○" : "×"})
+        </div>
       `;
     }
 
