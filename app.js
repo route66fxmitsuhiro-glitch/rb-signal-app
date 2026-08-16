@@ -32,9 +32,13 @@ const WEEKLY_TRANCHES = [
 
 const BASE_LOT_DAILY = 0.10;   // バックテスト基準ロット(1ペアあたり)
 const BASE_LOT_WEEKLY = 0.10;  // バックテスト基準ロット(1ペアあたり)
-const REFERENCE_MAX_DD_USD = 2510.22; // 実データの最大DD(現行ロット構成、口座通貨USD想定)
-const MIN_LOT = 0.01;
-const LOT_STEP = 0.01;
+// 実データの最大DD(口座通貨USD想定、0.10ロット基準)。
+// 【重要】このアプリはコア(日足RideThin+週足ドンチャン)のみを実装しており、
+// RB12tuned全体(コア+12衛星レイヤー)のDD(2,510.22)ではなく、コア単体の
+// DD(3,369.33、2026-08-16に確定損益ベースの疑似エクイティカーブで算出)を
+// 使う。12層による分散効果でDDが縮んでいるため、フル構成の数値をそのまま
+// 使うとコア単体運用としてはロットを過大評価してしまう。
+const REFERENCE_MAX_DD_USD = 3369.33;
 
 const API_OUTPUT_SIZE = 40; // ATR14+週足集計に十分な日数
 
@@ -209,7 +213,10 @@ function breakoutDirection(prevPrev, prev) {
   const brokeLow = prev.low < prevPrev.low;
   let direction = null;
   if (brokeHigh && brokeLow) {
-    direction = prev.close >= prev.open ? "long" : "short";
+    // EAと同じ扱い: 陽線→ロング、陰線→ショート、終値=始値の完全同値は
+    // シグナルなし(direction=nullのまま)。
+    if (prev.close > prev.open) direction = "long";
+    else if (prev.close < prev.open) direction = "short";
   } else if (brokeHigh) {
     direction = "long";
   } else if (brokeLow) {
@@ -238,15 +245,22 @@ function computeDailySignal(bars) {
   };
 }
 
-// 土日は「取引中の週」が存在しない(FXは月〜金しか動かない)ため、直近の月〜金の
-// 週は既に完結しているとみなしてよい。平日(月〜金)だけを「まだ進行中かもしれない週」
-// の判定対象にする。
-function isWeekdayLocal() {
-  const day = new Date().getDay(); // 0=日,6=土(ローカル)
-  return day >= 1 && day <= 5;
+// 【重要】実際のEA(RB12tuned.cpp)は「今日が月曜かどうか」ではなく、
+// 「直近の完成日足バー(=前営業日)が月曜だったかどうか」で新しい週の
+// 確定を検知している(UpdateWeeklyHistory: dow(Time(1))==Monday)。
+// これは「月曜の足が閉じて初めて前週が確定し、その翌営業日(通常火曜)の
+// 始値でエントリーする」ことを意味する。実データでも週足ドンチャンの
+// エントリーは3,890件全件が火曜日だった(2026-08-16に実トレードログで確認済み)。
+// 「月曜アンカー」という呼び方に引きずられて当初は月曜判定で実装していたが誤り。
+function lastCompleteBarIsMonday(dailyBars) {
+  if (dailyBars.length === 0) return false;
+  const last = dailyBars[dailyBars.length - 1];
+  return dowOf(last.date) === 1; // 1=月曜
 }
 
-// 日足バーを月曜始まりの週足に集計。「今日を含む週」が平日進行中の場合のみ未完成として除外する。
+// 日足バーを月曜始まりの週足に集計する。直近の週グループ(まだ月曜の足
+// しか無い、または金曜まで揃っていても翌週月曜の足がまだ確定していない
+// week)は、EAの確定タイミングに合わせて常に除外する。
 function aggregateWeekly(dailyBars) {
   const groups = new Map();
   for (const b of dailyBars) {
@@ -254,12 +268,8 @@ function aggregateWeekly(dailyBars) {
     if (!groups.has(wk)) groups.set(wk, []);
     groups.get(wk).push(b);
   }
-  // 土日にチェックした場合、直前の月〜金の週は既に終わっているのでcurrentWeekKeyはnull
-  // (=除外対象なし)にする。平日にチェックした場合のみ、今週を進行中として除外する。
-  const currentWeekKey = isWeekdayLocal() ? weekKeyOf(todayStr()) : null;
   const weeks = [];
   for (const [wk, arr] of groups.entries()) {
-    if (wk === currentWeekKey) continue; // 進行中の週は除外
     arr.sort((a, b) => (a.date < b.date ? -1 : 1));
     weeks.push({
       weekKey: wk,
@@ -270,7 +280,10 @@ function aggregateWeekly(dailyBars) {
     });
   }
   weeks.sort((a, b) => (a.weekKey < b.weekKey ? -1 : 1));
-  return weeks;
+  // 最新の週グループ(進行中、または月曜の足だけがまだ確定した直後)は
+  // 常に「未確定」として比較対象から除外する。これによりEAと同じく
+  // 「直近の完成2週」を正しく取り出せる(月曜/火曜かによらず一貫した規則)。
+  return weeks.length > 0 ? weeks.slice(0, -1) : weeks;
 }
 
 // シグナルの有無にかかわらず、必ず判定根拠(前々週/前週の高安)を含めて返す。
@@ -297,9 +310,12 @@ function lotScaleFactor(settings) {
   return ddBudgetUsd / REFERENCE_MAX_DD_USD;
 }
 
+// EAのRoundLot()と完全に同じ式(floor(lot*100+0.5)/100、round-half-up)。
+// 最小0.01への強制はしない — 実際のEAもスケールが小さすぎて0.005未満に
+// 丸まった場合は0を返し、そのトランシェは発注されない(教訓67のロット丸め
+// 誤差の議論と同じ挙動)。
 function roundLot(v) {
-  const r = Math.round(v / LOT_STEP) * LOT_STEP;
-  return Math.max(MIN_LOT, Math.round(r * 100) / 100);
+  return Math.floor(v * 100 + 0.5) / 100;
 }
 
 function tranchesWithLots(tranches, baseLot, scale) {
@@ -454,15 +470,25 @@ function renderSignals(results) {
       const scale = lotScaleFactor(state.settings);
       const tranches = tranchesWithLots(WEEKLY_TRANCHES, BASE_LOT_WEEKLY, scale);
       const lastWeek = r.weekly.bars[r.weekly.bars.length - 1];
-      const oppositeExtreme = wsig.direction === "long" ? lastWeek.low : lastWeek.high;
-      const breakoutLevel = wsig.direction === "long" ? lastWeek.high : lastWeek.low;
-      const rApprox = Math.abs(breakoutLevel - oppositeExtreme);
+      const isNewToday = lastCompleteBarIsMonday(r.daily.bars);
+      // 実際のR = 約定価格 - 前週安値(ロング) / 前週高値 - 約定価格(ショート)。
+      // 約定価格はまだ分からないため、表示用にATR代わりのレンジ幅ではなく
+      // 「前週高値/安値を仮の約定価格とみなした場合のR」を参考値として出す
+      // (エントリー記録時に実際の約定価格でこの計算をやり直す)。
+      const rApprox = lastWeek.high - lastWeek.low;
       html += `
         <div class="pair-meta" style="margin-top:10px;">
-          <span class="badge ${badge}">週足 ${wsig.direction === "long" ? "ロング" : "ショート"}(月曜のみ新規判定)</span>
+          <span class="badge ${badge}">週足 ${wsig.direction === "long" ? "ロング" : "ショート"}</span>
+          ${isNewToday ? '<span class="badge warn">本日が新規判定日</span>' : '<span class="badge none">新規判定日は前回の月曜明け(通常火曜)</span>'}
           ${wsig.outside ? '<span class="badge warn">アウトサイド週(前週終値で一本化)</span>' : ""}
-          R(概算・先週レンジ幅)=${fmtPrice(rApprox, 3)}
+          R(参考値、約定前の概算)=${fmtPrice(rApprox, 3)}
         </div>
+        <p class="section-note">
+          実際のR = 約定価格 - 前週安値(ロング)/前週高値 - 約定価格(ショート)。
+          「このシグナルを記録」で実際の約定価格を入力すると正しいRに置き換わります。
+          新規エントリーは「直前の完成日足バーが月曜だった日」(通常は火曜)にのみ行われます
+          (月曜の足が確定して初めて前週が確定するため)。
+        </p>
         <div class="pair-meta">
           判定根拠: 前々週(${wsig.prevPrevWeek.weekKey}週) 高${fmtPrice(wsig.prevPrevWeek.high)}/安${fmtPrice(wsig.prevPrevWeek.low)}
           → 前週(${wsig.prevWeek.weekKey}週) 高${fmtPrice(wsig.prevWeek.high)}/安${fmtPrice(wsig.prevWeek.low)}
@@ -479,16 +505,23 @@ function renderSignals(results) {
               .join("")}
           </tbody>
         </table>
-        <button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
-          data-timeframe="weekly" data-direction="${wsig.direction}" data-r="${rApprox}">
-          このシグナルを記録
-        </button>
+        ${
+          isNewToday
+            ? `<button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
+                 data-timeframe="weekly" data-direction="${wsig.direction}"
+                 data-prevweekhigh="${lastWeek.high}" data-prevweeklow="${lastWeek.low}">
+                 このシグナルを記録
+               </button>`
+            : `<p class="section-note">本日は新規判定日ではありません。既にエントリー済みなら記録不要、
+               まだなら次の月曜明け(通常火曜)を待ってください。</p>`
+        }
       `;
     } else if (wsig) {
+      const isNewToday = lastCompleteBarIsMonday(r.daily.bars);
       html += `
         <div class="pair-meta" style="margin-top:10px;">
-          週足: <span class="badge none">今週シグナルなし</span>
-          ${isWeekdayLocal() ? "" : '<span class="badge warn">今日は週末(直近の月〜金の週で判定)</span>'}
+          週足: <span class="badge none">シグナルなし</span>
+          ${isNewToday ? '<span class="badge warn">本日は新規判定日</span>' : ""}
         </div>
         <div class="pair-meta">
           判定根拠: 前々週(${wsig.prevPrevWeek.weekKey}週) 高${fmtPrice(wsig.prevPrevWeek.high)}/安${fmtPrice(wsig.prevPrevWeek.low)}
@@ -615,9 +648,17 @@ function confirmEntry() {
   const scale = lotScaleFactor(state.settings);
   let R;
   if (pendingEntry.timeframe === "daily") {
+    // 日足のRはATR14そのもの(約定価格に依存しない、EAのr=ComputeATR14()と同じ)
     R = parseFloat(pendingEntry.atr);
   } else {
-    R = parseFloat(pendingEntry.r);
+    // 週足のRは実際の約定価格から計算し直す(EAのr = ep-前週安値 / 前週高値-ep と同じ式)。
+    const prevWeekHigh = parseFloat(pendingEntry.prevweekhigh);
+    const prevWeekLow = parseFloat(pendingEntry.prevweeklow);
+    R = pendingEntry.direction === "long" ? price - prevWeekLow : prevWeekHigh - price;
+    if (!(R > 0)) {
+      alert("入力された約定価格からRが0以下になりました(EAの実装ではこの場合エントリーしません)。価格を確認してください。");
+      return;
+    }
   }
   const baseLot = pendingEntry.timeframe === "daily" ? BASE_LOT_DAILY : BASE_LOT_WEEKLY;
   const rec = buildPositionRecord(
