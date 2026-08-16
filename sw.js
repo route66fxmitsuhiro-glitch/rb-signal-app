@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v11"; // v11: 数量表示をロットから枚(1枚=10,000通貨)に変更(app.js更新)
+const CACHE_NAME = "rb-signal-shell-v12"; // v12: 非円ペアの価格表示桁数不足を修正(GBPUSD等でT0/T1が同値に丸まるバグ)(app.js更新)
 const SHELL_FILES = [
   "./",
   "./index.html",

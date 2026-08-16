@@ -402,8 +402,22 @@ function currentExitLevel(pos, latestStopTrigger) {
 
 const state = { settings: loadSettings(), positions: loadPositions(), lastFetch: null };
 
-function fmtPrice(v, digits = 3) {
+// 【重要】円ペア(pip=0.01)は小数3桁で十分だが、GBPUSD等(pip=0.0001)は
+// 3桁では10pips未満の差を区別できず、例えばT0(0.5R)とT1(1.0R)の目標が
+// 同じ表示に丸まってしまうバグがあった(2026-08-17発見・修正)。
+// 第2引数にシンボル文字列を渡せばペアに応じた桁数を自動選択する
+// (円ペア=3桁、非円ペア=5桁)。数値を渡した場合は従来通り桁数を明示指定できる。
+function fmtPrice(v, symbolOrDigits) {
   if (v == null || Number.isNaN(v)) return "—";
+  let digits;
+  if (typeof symbolOrDigits === "number") {
+    digits = symbolOrDigits;
+  } else if (typeof symbolOrDigits === "string") {
+    const isJpy = symbolOrDigits.endsWith("JPY") || symbolOrDigits.endsWith("/JPY");
+    digits = isJpy ? 3 : 5;
+  } else {
+    digits = 3;
+  }
   return v.toFixed(digits);
 }
 
@@ -433,8 +447,8 @@ function renderWeeklyPreview(previewSignal, symbol) {
       (直近の暦完結週を含めた場合。まだEA未確定、火曜になれば正式判定に切り替わる)
     </div>
     <div class="pair-meta">
-      根拠: 前々週(${previewSignal.prevPrevWeek.weekKey}週) 高${fmtPrice(previewSignal.prevPrevWeek.high)}/安${fmtPrice(previewSignal.prevPrevWeek.low)}
-      → 前週(${previewSignal.prevWeek.weekKey}週) 高${fmtPrice(previewSignal.prevWeek.high)}/安${fmtPrice(previewSignal.prevWeek.low)}
+      根拠: 前々週(${previewSignal.prevPrevWeek.weekKey}週) 高${fmtPrice(previewSignal.prevPrevWeek.high, symbol)}/安${fmtPrice(previewSignal.prevPrevWeek.low, symbol)}
+      → 前週(${previewSignal.prevWeek.weekKey}週) 高${fmtPrice(previewSignal.prevWeek.high, symbol)}/安${fmtPrice(previewSignal.prevWeek.low, symbol)}
     </div>
   `;
 }
@@ -465,11 +479,11 @@ function renderSignals(results) {
         <div class="pair-meta">
           <span class="badge ${badge}">日足 ${dsig.direction === "long" ? "ロング" : "ショート"}</span>
           ${dsig.outside ? '<span class="badge warn">アウトサイド(前日終値で一本化)</span>' : ""}
-          ATR14=${fmtPrice(r.daily.atr14, 3)} (R)
+          ATR14=${fmtPrice(r.daily.atr14, r.symbol)} (R)
         </div>
         <div class="pair-meta">
-          判定根拠: 前々日 高${fmtPrice(dsig.prevPrevBar.high)}/安${fmtPrice(dsig.prevPrevBar.low)}
-          → 前日 高${fmtPrice(dsig.prevBar.high)}/安${fmtPrice(dsig.prevBar.low)}(${dsig.prevBar.date}、
+          判定根拠: 前々日 高${fmtPrice(dsig.prevPrevBar.high, r.symbol)}/安${fmtPrice(dsig.prevPrevBar.low, r.symbol)}
+          → 前日 高${fmtPrice(dsig.prevBar.high, r.symbol)}/安${fmtPrice(dsig.prevBar.low, r.symbol)}(${dsig.prevBar.date}、
           ${dsig.prevBar.close >= dsig.prevBar.open ? "陽線" : "陰線"})
         </div>
         <table class="tranche-table">
@@ -479,8 +493,8 @@ function renderSignals(results) {
               .map((t) => {
                 const offPips = t.targetR != null ? fmtPips(r.daily.atr14 * t.targetR, r.symbol) : "なし(ride)";
                 const stopNote = t.hardStopR
-                  ? `${fmtPrice(dsig.todayStopTrigger)} / -1.0R`
-                  : fmtPrice(dsig.todayStopTrigger);
+                  ? `${fmtPrice(dsig.todayStopTrigger, r.symbol)} / -1.0R`
+                  : fmtPrice(dsig.todayStopTrigger, r.symbol);
                 return `<tr><td>${t.name}</td><td>${fmtMai(t.lot)}枚</td><td>${offPips}</td><td>${stopNote}</td></tr>`;
               })
               .join("")}
@@ -498,8 +512,8 @@ function renderSignals(results) {
           日足: <span class="badge none">本日シグナルなし</span>
         </div>
         <div class="pair-meta">
-          判定根拠: 前々日 高${fmtPrice(dsig.prevPrevBar.high)}/安${fmtPrice(dsig.prevPrevBar.low)}
-          → 前日 高${fmtPrice(dsig.prevBar.high)}/安${fmtPrice(dsig.prevBar.low)}(${dsig.prevBar.date}、
+          判定根拠: 前々日 高${fmtPrice(dsig.prevPrevBar.high, r.symbol)}/安${fmtPrice(dsig.prevPrevBar.low, r.symbol)}
+          → 前日 高${fmtPrice(dsig.prevBar.high, r.symbol)}/安${fmtPrice(dsig.prevBar.low, r.symbol)}(${dsig.prevBar.date}、
           高値更新: ${dsig.brokeHigh ? "○" : "×"} / 安値更新: ${dsig.brokeLow ? "○" : "×"})
         </div>
       `;
@@ -525,7 +539,7 @@ function renderSignals(results) {
           <span class="badge ${badge}">週足 ${wsig.direction === "long" ? "ロング" : "ショート"}</span>
           ${isNewToday ? '<span class="badge warn">本日が新規判定日</span>' : '<span class="badge none">新規判定日は前回の月曜明け(通常火曜)</span>'}
           ${wsig.outside ? '<span class="badge warn">アウトサイド週(前週終値で一本化)</span>' : ""}
-          R(参考値、約定前の概算)=${fmtPrice(rApprox, 3)}
+          R(参考値、約定前の概算)=${fmtPrice(rApprox, r.symbol)}
         </div>
         <p class="section-note">
           実際のR = 約定価格 - 前週安値(ロング)/前週高値 - 約定価格(ショート)。
@@ -534,8 +548,8 @@ function renderSignals(results) {
           (月曜の足が確定して初めて前週が確定するため)。
         </p>
         <div class="pair-meta">
-          判定根拠: 前々週(${wsig.prevPrevWeek.weekKey}週) 高${fmtPrice(wsig.prevPrevWeek.high)}/安${fmtPrice(wsig.prevPrevWeek.low)}
-          → 前週(${wsig.prevWeek.weekKey}週) 高${fmtPrice(wsig.prevWeek.high)}/安${fmtPrice(wsig.prevWeek.low)}
+          判定根拠: 前々週(${wsig.prevPrevWeek.weekKey}週) 高${fmtPrice(wsig.prevPrevWeek.high, r.symbol)}/安${fmtPrice(wsig.prevPrevWeek.low, r.symbol)}
+          → 前週(${wsig.prevWeek.weekKey}週) 高${fmtPrice(wsig.prevWeek.high, r.symbol)}/安${fmtPrice(wsig.prevWeek.low, r.symbol)}
           (${wsig.prevWeek.close >= wsig.prevWeek.open ? "陽線" : "陰線"})
         </div>
         <table class="tranche-table">
@@ -544,7 +558,7 @@ function renderSignals(results) {
             ${tranches
               .map((t) => {
                 const offPips = t.targetR != null ? fmtPips(rApprox * t.targetR, r.symbol) : "なし(ride)";
-                return `<tr><td>${t.name}</td><td>${fmtMai(t.lot)}枚</td><td>${offPips}</td><td>${fmtPrice(wsig.todayStopTrigger)}</td></tr>`;
+                return `<tr><td>${t.name}</td><td>${fmtMai(t.lot)}枚</td><td>${offPips}</td><td>${fmtPrice(wsig.todayStopTrigger, r.symbol)}</td></tr>`;
               })
               .join("")}
           </tbody>
@@ -569,8 +583,8 @@ function renderSignals(results) {
           ${isNewToday ? '<span class="badge warn">本日は新規判定日</span>' : ""}
         </div>
         <div class="pair-meta">
-          判定根拠: 前々週(${wsig.prevPrevWeek.weekKey}週) 高${fmtPrice(wsig.prevPrevWeek.high)}/安${fmtPrice(wsig.prevPrevWeek.low)}
-          → 前週(${wsig.prevWeek.weekKey}週) 高${fmtPrice(wsig.prevWeek.high)}/安${fmtPrice(wsig.prevWeek.low)}
+          判定根拠: 前々週(${wsig.prevPrevWeek.weekKey}週) 高${fmtPrice(wsig.prevPrevWeek.high, r.symbol)}/安${fmtPrice(wsig.prevPrevWeek.low, r.symbol)}
+          → 前週(${wsig.prevWeek.weekKey}週) 高${fmtPrice(wsig.prevWeek.high, r.symbol)}/安${fmtPrice(wsig.prevWeek.low, r.symbol)}
           (高値更新: ${wsig.brokeHigh ? "○" : "×"} / 安値更新: ${wsig.brokeLow ? "○" : "×"})
         </div>
       `;
@@ -618,8 +632,8 @@ function renderPositions(freshDataBySymbol) {
         <span class="pair-name">${pos.pairLabel}</span>
         <span class="badge ${badge}">${pos.timeframe === "daily" ? "日足" : "週足"} ${pos.direction === "long" ? "ロング" : "ショート"}</span>
       </div>
-      <div class="pair-meta">エントリー ${pos.entryDate} @ ${fmtPrice(pos.entryPrice)} / R=${fmtPrice(pos.R)}</div>
-      <div class="pair-meta">現在の撤退ライン: <strong>${fmtPrice(exit.price)}</strong>(${exit.source})</div>
+      <div class="pair-meta">エントリー ${pos.entryDate} @ ${fmtPrice(pos.entryPrice, pos.symbol)} / R=${fmtPrice(pos.R, pos.symbol)}</div>
+      <div class="pair-meta">現在の撤退ライン: <strong>${fmtPrice(exit.price, pos.symbol)}</strong>(${exit.source})</div>
       <table class="tranche-table">
         <thead><tr><th>枠</th><th>枚数</th><th>目標</th><th>済</th></tr></thead>
         <tbody>
@@ -630,7 +644,7 @@ function renderPositions(freshDataBySymbol) {
       html += `<tr class="${rowClass}">
         <td>${t.name}</td>
         <td>${fmtMai(t.lot)}枚</td>
-        <td>${tp != null ? fmtPrice(tp) : "なし(反対ブレイクのみ)"}</td>
+        <td>${tp != null ? fmtPrice(tp, pos.symbol) : "なし(反対ブレイクのみ)"}</td>
         <td><input type="checkbox" class="close-toggle" data-pos="${pos.id}" data-tranche="${t.name}" ${t.closed ? "checked" : ""} /></td>
       </tr>`;
     }
