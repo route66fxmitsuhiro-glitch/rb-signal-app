@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v4"; // v4: シグナルなしの場合も判定根拠を必ず表示するよう変更(app.js更新)
+const CACHE_NAME = "rb-signal-shell-v6"; // v6: 土曜バーは除外でなく金曜へマージ、日曜は月曜へマージ(app.js更新)
 const SHELL_FILES = [
   "./",
   "./index.html",

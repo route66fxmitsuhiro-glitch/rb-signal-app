@@ -94,6 +94,63 @@ function todayStr() {
 
 // ========== Twelve Data 取得 ==========
 
+// 日付文字列(YYYY-MM-DD)の曜日(UTC正午基準、weekKeyOfと同じ解釈)。0=日,6=土。
+function dowOf(dateStr) {
+  return new Date(dateStr + "T12:00:00Z").getUTCDay();
+}
+
+// 2本のバー(aが時系列で先、bが後)を1本にマージする。
+function mergeBars(a, b) {
+  return {
+    date: b.date > a.date ? b.date : a.date, // 平日側の日付ラベルを優先
+    open: a.open,
+    high: Math.max(a.high, b.high),
+    low: Math.min(a.low, b.low),
+    close: b.close,
+  };
+}
+
+// FXはニューヨーク時間17時にクローズするため、日本時間では土曜早朝まで
+// 実際に値動きがある。「土曜日付のバー」を単純に除外すると金曜セッション
+// 終盤の値動きを切り捨ててしまうため、除外ではなく直前の金曜バーへマージ
+// する。日曜日付のバー(シドニー・ウェリントンの週明け早い時間帯)は、
+// 直後の月曜バーへマージする。これにより「前日」ではなく実質的に
+// 「前営業日」を使った判定になる。
+function mergeWeekendIntoWeekdays(rawBars) {
+  const sorted = [...rawBars].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const result = [];
+  let i = 0;
+  while (i < sorted.length) {
+    const cur = sorted[i];
+    const d = dowOf(cur.date);
+    if (d === 6) {
+      // 土曜 → 直前の平日バーにマージ(直前がなければ捨てる)
+      if (result.length > 0) {
+        result[result.length - 1] = mergeBars(result[result.length - 1], cur);
+      }
+      i++;
+    } else if (d === 0) {
+      // 日曜 → 直後のバー(通常は月曜)にマージ(直後がなければ捨てる)
+      if (i + 1 < sorted.length) {
+        result.push(mergeBars(cur, sorted[i + 1]));
+        i += 2;
+      } else {
+        i++;
+      }
+    } else {
+      result.push(cur);
+      i++;
+    }
+  }
+  return result;
+}
+
+// 実質的に値動きがない(高値=安値)バーは、休場日の繰り越しレコード
+// である可能性が高いので、前営業日としては扱わない(土日マージ後に適用)。
+function isDegenerateBar(b) {
+  return b.high === b.low;
+}
+
 async function fetchDailyBars(symbol, apiKey) {
   const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=1day&outputsize=${API_OUTPUT_SIZE}&apikey=${encodeURIComponent(apiKey)}`;
   let res;
@@ -107,16 +164,18 @@ async function fetchDailyBars(symbol, apiKey) {
   if (json.status === "error" || !Array.isArray(json.values)) {
     throw new Error(json.message || "APIがエラーを返しました(シンボル/APIキーを確認してください)");
   }
-  const bars = json.values.map((v) => ({
+  const rawBars = json.values.map((v) => ({
     date: v.datetime.slice(0, 10),
     open: parseFloat(v.open),
     high: parseFloat(v.high),
     low: parseFloat(v.low),
     close: parseFloat(v.close),
   }));
+  const merged = mergeWeekendIntoWeekdays(rawBars);
+  const bars = merged.filter((b) => !isDegenerateBar(b));
   bars.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
-  // 本日分がまだ形成中の可能性があるバーは除外する(保守的な近似)
+  // 本日分がまだ形成中の可能性があるバーは除外する(保守的な近似)。
   const today = todayStr();
   const complete = bars.filter((b) => b.date < today);
   return complete.length >= 2 ? complete : bars.slice(0, -1);
