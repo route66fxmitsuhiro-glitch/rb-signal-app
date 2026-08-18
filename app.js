@@ -103,10 +103,14 @@ function dowOf(dateStr) {
   return new Date(dateStr + "T12:00:00Z").getUTCDay();
 }
 
-// 2本のバー(aが時系列で先、bが後)を1本にマージする。
-function mergeBars(a, b) {
+// 2本のバー(aが時系列で先、bが後)を1本にマージする。dateLabelは呼び出し側が
+// 明示的に指定する(以前は「b.date>a.dateなら後者を採用」という単純な比較にして
+// いたが、これは常に時系列で後のバーの日付を選んでしまい、土曜マージのケースで
+// 平日(金曜)ではなく土曜の日付になってしまうバグがあった — コメントで謳っていた
+// 「平日側の日付ラベルを優先」を満たしていなかった)。
+function mergeBars(a, b, dateLabel) {
   return {
-    date: b.date > a.date ? b.date : a.date, // 平日側の日付ラベルを優先
+    date: dateLabel,
     open: a.open,
     high: Math.max(a.high, b.high),
     low: Math.min(a.low, b.low),
@@ -128,15 +132,16 @@ function mergeWeekendIntoWeekdays(rawBars) {
     const cur = sorted[i];
     const d = dowOf(cur.date);
     if (d === 6) {
-      // 土曜 → 直前の平日バーにマージ(直前がなければ捨てる)
+      // 土曜 → 直前の平日バーにマージ(直前がなければ捨てる)。日付ラベルは金曜(平日側)を維持する。
       if (result.length > 0) {
-        result[result.length - 1] = mergeBars(result[result.length - 1], cur);
+        const prev = result[result.length - 1];
+        result[result.length - 1] = mergeBars(prev, cur, prev.date);
       }
       i++;
     } else if (d === 0) {
-      // 日曜 → 直後のバー(通常は月曜)にマージ(直後がなければ捨てる)
+      // 日曜 → 直後のバー(通常は月曜)にマージ(直後がなければ捨てる)。日付ラベルは月曜(平日側)を維持する。
       if (i + 1 < sorted.length) {
-        result.push(mergeBars(cur, sorted[i + 1]));
+        result.push(mergeBars(cur, sorted[i + 1], sorted[i + 1].date));
         i += 2;
       } else {
         i++;
@@ -381,6 +386,23 @@ function hardStopPrice(pos, tranche) {
   return pos.direction === "long" ? pos.entryPrice - off : pos.entryPrice + off;
 }
 
+// 週足の撤退ライン根拠を、実際の日足バー内訳(どの日の安値/高値が採用値かを含む)まで
+// 遡って返す。ブローカー表示とのズレを切り分けるための診断表示に使う。
+function weeklyBreakdown(weekBar, dailyBars, direction) {
+  if (!weekBar || !dailyBars) return null;
+  const daysInWeek = dailyBars.filter((b) => weekKeyOf(b.date) === weekBar.weekKey);
+  const extremeVal = direction === "long" ? weekBar.low : weekBar.high;
+  return {
+    weekKey: weekBar.weekKey,
+    days: daysInWeek.map((d) => ({
+      date: d.date,
+      low: d.low,
+      high: d.high,
+      isExtreme: direction === "long" ? d.low === extremeVal : d.high === extremeVal,
+    })),
+  };
+}
+
 // 「反対ブレイクによる撤退ライン」を、そのポジションの時間軸に応じた最新の完成バーから計算し、
 // hardStopがあればより近い方(エントリーに近い方)を採用する。
 function currentExitLevel(pos, latestStopTrigger) {
@@ -610,17 +632,18 @@ function renderPositions(freshDataBySymbol) {
   for (const pos of openPositions) {
     const fresh = freshDataBySymbol ? freshDataBySymbol[pos.symbol] : null;
     let stopTrigger = null;
+    let weeklyBreak = null;
     if (fresh) {
-      stopTrigger =
-        pos.timeframe === "daily"
-          ? pos.direction === "long"
+      if (pos.timeframe === "daily") {
+        stopTrigger =
+          pos.direction === "long"
             ? fresh.daily.bars[fresh.daily.bars.length - 1].low
-            : fresh.daily.bars[fresh.daily.bars.length - 1].high
-          : fresh.weekly.bars.length
-          ? pos.direction === "long"
-            ? fresh.weekly.bars[fresh.weekly.bars.length - 1].low
-            : fresh.weekly.bars[fresh.weekly.bars.length - 1].high
-          : null;
+            : fresh.daily.bars[fresh.daily.bars.length - 1].high;
+      } else if (fresh.weekly.bars.length) {
+        const lastWeekBar = fresh.weekly.bars[fresh.weekly.bars.length - 1];
+        stopTrigger = pos.direction === "long" ? lastWeekBar.low : lastWeekBar.high;
+        weeklyBreak = weeklyBreakdown(lastWeekBar, fresh.daily.bars, pos.direction);
+      }
     }
     const exit = currentExitLevel(pos, stopTrigger);
 
@@ -634,6 +657,20 @@ function renderPositions(freshDataBySymbol) {
       </div>
       <div class="pair-meta">エントリー ${pos.entryDate} @ ${fmtPrice(pos.entryPrice, pos.symbol)} / R=${fmtPrice(pos.R, pos.symbol)}</div>
       <div class="pair-meta">現在の撤退ライン: <strong>${fmtPrice(exit.price, pos.symbol)}</strong>(${exit.source})</div>
+      ${
+        weeklyBreak
+          ? `<div class="pair-meta section-note">
+              根拠: ${weeklyBreak.weekKey}週(月曜始まり)の${pos.direction === "long" ? "安値" : "高値"}。日別内訳:
+              ${weeklyBreak.days
+                .map(
+                  (d) =>
+                    `${d.date}${pos.direction === "long" ? fmtPrice(d.low, pos.symbol) : fmtPrice(d.high, pos.symbol)}${d.isExtreme ? "★" : ""}`
+                )
+                .join(" / ")}
+              (★=採用値。ブローカーの同じ日付の値と比較してズレを確認してください)
+            </div>`
+          : ""
+      }
       <table class="tranche-table">
         <thead><tr><th>枠</th><th>枚数</th><th>目標</th><th>済</th></tr></thead>
         <tbody>

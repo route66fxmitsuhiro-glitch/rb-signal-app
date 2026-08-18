@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v12"; // v12: 非円ペアの価格表示桁数不足を修正(GBPUSD等でT0/T1が同値に丸まるバグ)(app.js更新)
+const CACHE_NAME = "rb-signal-shell-v13"; // v13: 週足撤退ラインの根拠(週・日別内訳)を表示、土曜マージの日付ラベルバグを修正(app.js更新)
 const SHELL_FILES = [
   "./",
   "./index.html",
