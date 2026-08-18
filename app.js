@@ -428,6 +428,22 @@ function currentExitLevel(pos, latestStopTrigger) {
 
 const state = { settings: loadSettings(), positions: loadPositions(), lastFetch: null };
 
+// EAの AnyOpen()/WDAnyOpen() 相当。同じペア・時間軸・方向のトランシェが
+// 1つでも未決済で残っている間、EAは新しいブレイクアウトが成立しても
+// 新規エントリーしない(rideトランシェは反対ブレイクまで長く保有される
+// ため、保有中に同方向のブレイクが再度起きることは珍しくない)。
+// このアプリはEAの内部状態(handle配列)を持たないため、ユーザーが
+// 「保有中トランシェ」に記録している未決済ポジションで代用判定する。
+function hasOpenPosition(symbol, timeframe, direction) {
+  return state.positions.some(
+    (p) =>
+      p.symbol === symbol &&
+      p.timeframe === timeframe &&
+      p.direction === direction &&
+      p.tranches.some((t) => !t.closed)
+  );
+}
+
 // 【重要】円ペア(pip=0.01)は小数3桁で十分だが、GBPUSD等(pip=0.0001)は
 // 3桁では10pips未満の差を区別できず、例えばT0(0.5R)とT1(1.0R)の目標が
 // 同じ表示に丸まってしまうバグがあった(2026-08-17発見・修正)。
@@ -501,10 +517,12 @@ function renderSignals(results) {
       const badge = dsig.direction === "long" ? "long" : "short";
       const scale = lotScaleFactor(state.settings);
       const tranches = tranchesWithLots(DAILY_TRANCHES, BASE_LOT_DAILY, scale);
+      const alreadyOpen = hasOpenPosition(r.symbol, "daily", dsig.direction);
       html += `
         <div class="pair-meta">
           <span class="badge ${badge}">日足 ${dsig.direction === "long" ? "ロング" : "ショート"}</span>
           ${dsig.outside ? '<span class="badge warn">アウトサイド(前日終値で一本化)</span>' : ""}
+          ${alreadyOpen ? '<span class="badge warn">既に保有中(EAは新規建てしない)</span>' : ""}
           ATR14=${fmtPrice(r.daily.atr14, r.symbol)} (R)
         </div>
         <div class="pair-meta">
@@ -526,11 +544,17 @@ function renderSignals(results) {
               .join("")}
           </tbody>
         </table>
-        <p class="section-note">エントリー(今日の始値)後、実際の約定価格を「保有中トランシェ」に記録してください。</p>
-        <button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
-          data-timeframe="daily" data-direction="${dsig.direction}" data-atr="${r.daily.atr14}">
-          このシグナルを記録
-        </button>
+        ${
+          alreadyOpen
+            ? `<p class="section-note">同じペア・方向のトランシェを既に保有中です。EA(RB12tuned)は
+               <code>AnyOpen()</code>により、そのトランシェが全て決済されるまで同方向の新規シグナルを
+               取りません。ここで改めて記録すると実機の挙動より多く建ててしまうため、記録しないでください。</p>`
+            : `<p class="section-note">エントリー(今日の始値)後、実際の約定価格を「保有中トランシェ」に記録してください。</p>
+               <button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
+                 data-timeframe="daily" data-direction="${dsig.direction}" data-atr="${r.daily.atr14}">
+                 このシグナルを記録
+               </button>`
+        }
       `;
     } else if (dsig) {
       html += `
@@ -560,11 +584,13 @@ function renderSignals(results) {
       // 「前週高値/安値を仮の約定価格とみなした場合のR」を参考値として出す
       // (エントリー記録時に実際の約定価格でこの計算をやり直す)。
       const rApprox = lastWeek.high - lastWeek.low;
+      const alreadyOpenWeekly = hasOpenPosition(r.symbol, "weekly", wsig.direction);
       html += `
         <div class="pair-meta" style="margin-top:10px;">
           <span class="badge ${badge}">週足 ${wsig.direction === "long" ? "ロング" : "ショート"}</span>
           ${isNewToday ? '<span class="badge warn">本日が新規判定日</span>' : '<span class="badge none">新規判定日は前回の月曜明け(通常火曜)</span>'}
           ${wsig.outside ? '<span class="badge warn">アウトサイド週(前週終値で一本化)</span>' : ""}
+          ${alreadyOpenWeekly ? '<span class="badge warn">既に保有中(EAは新規建てしない)</span>' : ""}
           R(参考値、約定前の概算)=${fmtPrice(rApprox, r.symbol)}
         </div>
         <p class="section-note">
@@ -590,7 +616,11 @@ function renderSignals(results) {
           </tbody>
         </table>
         ${
-          isNewToday
+          alreadyOpenWeekly
+            ? `<p class="section-note">同じペア・方向のトランシェを既に保有中です。EA(RB12tuned)は
+               <code>WDAnyOpen()</code>により、そのトランシェが全て決済されるまで同方向の新規シグナルを
+               取りません。ここで改めて記録しないでください。</p>`
+            : isNewToday
             ? `<button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
                  data-timeframe="weekly" data-direction="${wsig.direction}"
                  data-prevweekhigh="${lastWeek.high}" data-prevweeklow="${lastWeek.low}">
