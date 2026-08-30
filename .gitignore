@@ -1,0 +1,5 @@
+# VAPID秘密鍵・その他秘密情報は絶対にコミットしない
+vapid_private*.pem
+vapid_private*.txt
+*.env
+node_modules/

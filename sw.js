@@ -1,10 +1,11 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v15"; // v15: 保有中ポジションがある場合、EAのAnyOpen()相当のガードとして新規シグナル記録を抑制(app.js更新)
+const CACHE_NAME = "rb-signal-shell-v17"; // v17: Web Pushプッシュ通知の受信処理を追加(GitHub Actionsから日足境界15分前に送信)
 const SHELL_FILES = [
   "./",
   "./index.html",
   "./style.css",
+  "./signal-core.js",
   "./app.js",
   "./manifest.json",
   "./icons/icon-192.png",
@@ -34,5 +35,38 @@ self.addEventListener("fetch", (event) => {
 
   event.respondWith(
     caches.match(event.request).then((cached) => cached || fetch(event.request))
+  );
+});
+
+// GitHub Actions(notify/check-signals.js)からのプッシュ通知を受信して表示する。
+self.addEventListener("push", (event) => {
+  let data = { title: "RBシグナル", body: "新しいシグナルがあります" };
+  if (event.data) {
+    try {
+      data = event.data.json();
+    } catch (e) {
+      data.body = event.data.text();
+    }
+  }
+  event.waitUntil(
+    self.registration.showNotification(data.title || "RBシグナル", {
+      body: data.body || "",
+      icon: "./icons/icon-192.png",
+      badge: "./icons/icon-192.png",
+    })
+  );
+});
+
+// 通知タップでアプリを開く(既に開いているタブがあればそれをフォーカス)。
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: "window" }).then((clientList) => {
+      for (const client of clientList) {
+        if ("focus" in client) return client.focus();
+      }
+      if (self.clients.openWindow) return self.clients.openWindow("./");
+      return undefined;
+    })
   );
 });

@@ -1,0 +1,35 @@
+name: RBシグナル通知
+
+on:
+  schedule:
+    # 日足境界(米国東部時間17:00)の15分前=16:45 America/New_York。
+    # サマータイム(EDT, UTC-4)ならUTC20:45、冬時間(EST, UTC-5)ならUTC21:45。
+    # GitHub Actionsのcronはサマータイムに連動しないため、両方の時刻で
+    # 毎日起動し、check-signals.js自身が「今日、実際にどちらが対象時刻か」
+    # を判定する(該当しない方は数秒で終了するだけで実害はない)。
+    - cron: "45 20 * * *" # 夏時間(EDT)用: JST 05:45頃
+    - cron: "45 21 * * *" # 冬時間(EST)用: JST 06:45頃
+  workflow_dispatch: {} # 手動実行用(Actionsタブから "Run workflow" で即時テストできる。時刻判定もそのまま行われる点に注意)
+
+jobs:
+  check-signals:
+    runs-on: ubuntu-latest
+    steps:
+      - name: リポジトリを取得
+        uses: actions/checkout@v4
+
+      - name: Node.jsをセットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: web-pushライブラリをインストール
+        run: npm install web-push@3
+
+      - name: シグナル判定・プッシュ通知送信
+        env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+          PUSH_SUBSCRIPTION: ${{ secrets.PUSH_SUBSCRIPTION }}
+        run: node notify/check-signals.js

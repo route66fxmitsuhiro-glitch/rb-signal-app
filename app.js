@@ -6,13 +6,25 @@
  * ride サーキットブレーカーと9つの分散レイヤーは未実装(フェーズ2)。
  */
 
-// ========== 設定値(EAの実装に合わせた固定値) ==========
+// ========== 共通ロジック(signal-core.js)からの読み込み ==========
+// シグナル判定の純粋ロジックは signal-core.js に集約し、通知バッチ
+// (notify/check-signals.js)と共有している。ここでは分割代入で必要な
+// 関数・定数を取り出すだけにし、二重実装によるロジックのズレを防ぐ。
+const {
+  PAIRS,
+  weekKeyOf,
+  todayStr,
+  fetchDailyBars,
+  computeATR14,
+  computeDailySignal,
+  lastCompleteBarIsMonday,
+  aggregateWeekly,
+  officialWeeks,
+  previewWeeks,
+  computeWeeklySignal,
+} = SignalCore;
 
-const PAIRS = [
-  { symbol: "GBP/JPY", label: "GBPJPY" },
-  { symbol: "GBP/USD", label: "GBPUSD" },
-  { symbol: "USD/JPY", label: "USDJPY" },
-];
+// ========== 設定値(EAの実装に合わせた固定値) ==========
 
 // 日足RideThin(Ride15配分)。targetR=nullは目標なし(ride、反対ブレイクのみ+ハードストップ)。
 const DAILY_TRANCHES = [
@@ -39,8 +51,6 @@ const BASE_LOT_WEEKLY = 0.10;  // バックテスト基準ロット(1ペアあ�
 // 使う。12層による分散効果でDDが縮んでいるため、フル構成の数値をそのまま
 // 使うとコア単体運用としてはロットを過大評価してしまう。
 const REFERENCE_MAX_DD_USD = 3369.33;
-
-const API_OUTPUT_SIZE = 40; // ATR14+週足集計に十分な日数
 
 // ========== ローカルストレージ ==========
 
@@ -69,267 +79,8 @@ function savePositions(list) {
   localStorage.setItem(LS_POSITIONS, JSON.stringify(list));
 }
 
-// ========== 日付・週の補助関数 ==========
-
-function ymd(d) {
-  return d.toISOString().slice(0, 10);
-}
-
-// 月曜始まりの週キー(その週の月曜日のYYYY-MM-DD)を返す
-function weekKeyOf(dateStr) {
-  const d = new Date(dateStr + "T00:00:00Z");
-  const day = d.getUTCDay(); // 0=日,1=月,...
-  const diffToMonday = day === 0 ? 6 : day - 1;
-  d.setUTCDate(d.getUTCDate() - diffToMonday);
-  return ymd(d);
-}
-
-// 「今日」はUTCではなく端末のローカル日付で判定する(JSTユーザーが朝チェックする
-// 運用を想定。ymd()はUTC変換のため、todayStr()だけは別実装にする — 修正前は
-// UTC日付を使っていたため、JSTの朝〜午前9時台は「今日」がまだ前日のまま判定され、
-// 月曜の朝に週境界の判定がずれるバグがあった)
-function todayStr() {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-// ========== Twelve Data 取得 ==========
-
-// 日付文字列(YYYY-MM-DD)の曜日(UTC正午基準、weekKeyOfと同じ解釈)。0=日,6=土。
-function dowOf(dateStr) {
-  return new Date(dateStr + "T12:00:00Z").getUTCDay();
-}
-
-// 2本のバー(aが時系列で先、bが後)を1本にマージする。dateLabelは呼び出し側が
-// 明示的に指定する(以前は「b.date>a.dateなら後者を採用」という単純な比較にして
-// いたが、これは常に時系列で後のバーの日付を選んでしまい、土曜マージのケースで
-// 平日(金曜)ではなく土曜の日付になってしまうバグがあった — コメントで謳っていた
-// 「平日側の日付ラベルを優先」を満たしていなかった)。
-function mergeBars(a, b, dateLabel) {
-  return {
-    date: dateLabel,
-    open: a.open,
-    high: Math.max(a.high, b.high),
-    low: Math.min(a.low, b.low),
-    close: b.close,
-  };
-}
-
-// FXはニューヨーク時間17時にクローズするため、日本時間では土曜早朝まで
-// 実際に値動きがある。「土曜日付のバー」を単純に除外すると金曜セッション
-// 終盤の値動きを切り捨ててしまうため、除外ではなく直前の金曜バーへマージ
-// する(これは実際の取引が反映された値動きなので採用して問題ない)。
-//
-// 【重要・2026-08-18修正】日曜日付のバー(シドニー・ウェリントンの週明け
-// 早い時間帯)は、以前は月曜バーへ高安ごとマージしていたが、この時間帯は
-// 薄商いで非現実的なヒゲが乗りやすく、ブローカー実勢と大きく乖離する
-// ケースが実データで見つかった(実例: 2026-08-09[日]のlow=212.14567が
-// 月曜[2026-08-10]の安値に混入し、週足の撤退ラインが本来の月曜単体の
-// 安値[212.762、ブローカーの212.696とは7pips弱の差]から212.146まで
-// 55pipsもズレた)。そのため日曜のバーは高安・始値に一切反映させず、
-// 単純に破棄する(月曜は月曜自身の値をそのまま使う)。これにより「前日」
-// ではなく実質的に「前営業日」を使った判定になるという当初の目的(日曜を
-// 余分な1日としてカウントしない)は変わらず維持される。
-function mergeWeekendIntoWeekdays(rawBars) {
-  const sorted = [...rawBars].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-  const result = [];
-  let i = 0;
-  while (i < sorted.length) {
-    const cur = sorted[i];
-    const d = dowOf(cur.date);
-    if (d === 6) {
-      // 土曜 → 直前の平日バーにマージ(直前がなければ捨てる)。日付ラベルは金曜(平日側)を維持する。
-      if (result.length > 0) {
-        const prev = result[result.length - 1];
-        result[result.length - 1] = mergeBars(prev, cur, prev.date);
-      }
-      i++;
-    } else if (d === 0) {
-      // 日曜 → マージせず単純に破棄する(薄商いのヒゲを月曜に持ち込まない)。
-      i++;
-    } else {
-      result.push(cur);
-      i++;
-    }
-  }
-  return result;
-}
-
-// 実質的に値動きがない(高値=安値)バーは、休場日の繰り越しレコード
-// である可能性が高いので、前営業日としては扱わない(土日マージ後に適用)。
-function isDegenerateBar(b) {
-  return b.high === b.low;
-}
-
-async function fetchDailyBars(symbol, apiKey) {
-  const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=1day&outputsize=${API_OUTPUT_SIZE}&apikey=${encodeURIComponent(apiKey)}`;
-  let res;
-  try {
-    res = await fetch(url);
-  } catch (e) {
-    throw new Error(`通信エラー(CORSでブロックされている可能性があります): ${e.message}`);
-  }
-  if (!res.ok) throw new Error(`HTTPエラー ${res.status}`);
-  const json = await res.json();
-  if (json.status === "error" || !Array.isArray(json.values)) {
-    throw new Error(json.message || "APIがエラーを返しました(シンボル/APIキーを確認してください)");
-  }
-  const rawBars = json.values.map((v) => ({
-    date: v.datetime.slice(0, 10),
-    open: parseFloat(v.open),
-    high: parseFloat(v.high),
-    low: parseFloat(v.low),
-    close: parseFloat(v.close),
-  }));
-  const merged = mergeWeekendIntoWeekdays(rawBars);
-  const bars = merged.filter((b) => !isDegenerateBar(b));
-  bars.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-
-  // 本日分がまだ形成中の可能性があるバーは除外する(保守的な近似)。
-  const today = todayStr();
-  const complete = bars.filter((b) => b.date < today);
-  return complete.length >= 2 ? complete : bars.slice(0, -1);
-}
-
-// ========== 計算ロジック ==========
-
-// ATR14(単純平均、EAのComputeATR14()相当。Wilder平滑化ではない点に注意)
-function computeATR14(bars) {
-  if (bars.length < 15) return null;
-  const trs = [];
-  for (let i = 1; i < bars.length; i++) {
-    const cur = bars[i], prev = bars[i - 1];
-    const tr = Math.max(
-      cur.high - cur.low,
-      Math.abs(cur.high - prev.close),
-      Math.abs(cur.low - prev.close)
-    );
-    trs.push(tr);
-  }
-  const last14 = trs.slice(-14);
-  return last14.reduce((a, b) => a + b, 0) / last14.length;
-}
-
-// 直近2本の完成バーからN=1ブレイクアウト方向を判定。
-// 高値・安値を両方同時に更新した場合(アウトサイド)は陽線/陰線で一本化する
-// (=「高値を更新したから単純にロング」にはならない点に注意。outsideフラグを
-// 呼び出し側に返すのでUIに理由を表示できるようにする)。
-function breakoutDirection(prevPrev, prev) {
-  const brokeHigh = prev.high > prevPrev.high;
-  const brokeLow = prev.low < prevPrev.low;
-  let direction = null;
-  if (brokeHigh && brokeLow) {
-    // EAと同じ扱い: 陽線→ロング、陰線→ショート、終値=始値の完全同値は
-    // シグナルなし(direction=nullのまま)。
-    if (prev.close > prev.open) direction = "long";
-    else if (prev.close < prev.open) direction = "short";
-  } else if (brokeHigh) {
-    direction = "long";
-  } else if (brokeLow) {
-    direction = "short";
-  }
-  return { direction, outside: brokeHigh && brokeLow, brokeHigh, brokeLow };
-}
-
-// シグナルの有無にかかわらず、必ず判定根拠(前々日/前日の高安)を含めて返す。
-// direction:null は「シグナルなし」(=アプリが正常に動いた上での結論)を意味する。
-function computeDailySignal(bars) {
-  if (bars.length < 2) {
-    return { direction: null, insufficientData: true };
-  }
-  const prev = bars[bars.length - 1];
-  const prevPrev = bars[bars.length - 2];
-  const res = breakoutDirection(prevPrev, prev);
-  return {
-    direction: res.direction,
-    outside: res.outside,
-    prevBar: prev,
-    prevPrevBar: prevPrev,
-    referenceDate: prev.date,
-    // 参考値: 当日の逆指値(反対ブレイク水準)は直近完成バーの安値/高値
-    todayStopTrigger: res.direction ? (res.direction === "long" ? prev.low : prev.high) : null,
-  };
-}
-
-// 【重要】実際のEA(RB12tuned.cpp)は「今日が月曜かどうか」ではなく、
-// 「直近の完成日足バー(=前営業日)が月曜だったかどうか」で新しい週の
-// 確定を検知している(UpdateWeeklyHistory: dow(Time(1))==Monday)。
-// これは「月曜の足が閉じて初めて前週が確定し、その翌営業日(通常火曜)の
-// 始値でエントリーする」ことを意味する。実データでも週足ドンチャンの
-// エントリーは3,890件全件が火曜日だった(2026-08-16に実トレードログで確認済み)。
-// 「月曜アンカー」という呼び方に引きずられて当初は月曜判定で実装していたが誤り。
-function lastCompleteBarIsMonday(dailyBars) {
-  if (dailyBars.length === 0) return false;
-  const last = dailyBars[dailyBars.length - 1];
-  return dowOf(last.date) === 1; // 1=月曜
-}
-
-// 日足バーを月曜始まりの週足に集計する。全ての週グループをそのまま返す
-// (「EA確定済みの週」と「まだ確定していないが暦の上では完結している週」を
-// 呼び出し側で使い分けられるようにするため)。
-function aggregateWeekly(dailyBars) {
-  const groups = new Map();
-  for (const b of dailyBars) {
-    const wk = weekKeyOf(b.date);
-    if (!groups.has(wk)) groups.set(wk, []);
-    groups.get(wk).push(b);
-  }
-  const weeks = [];
-  for (const [wk, arr] of groups.entries()) {
-    arr.sort((a, b) => (a.date < b.date ? -1 : 1));
-    const lastDay = arr[arr.length - 1];
-    weeks.push({
-      weekKey: wk,
-      open: arr[0].open,
-      high: Math.max(...arr.map((x) => x.high)),
-      low: Math.min(...arr.map((x) => x.low)),
-      close: arr[arr.length - 1].close,
-      lastDayDow: dowOf(lastDay.date), // 暦の上でこの週が金曜まで埋まっているか判定用
-    });
-  }
-  weeks.sort((a, b) => (a.weekKey < b.weekKey ? -1 : 1));
-  return weeks;
-}
-
-// EAが実際に使う「確定済みの週」だけを取り出す(直近1週グループは常に
-// 未確定として除外。月曜の足しかない/金曜まで揃っているが翌週月曜の足が
-// まだ来ていない、いずれの場合も同じ扱い)。
-function officialWeeks(allWeeks) {
-  return allWeeks.length > 0 ? allWeeks.slice(0, -1) : allWeeks;
-}
-
-// 「暦の上ではもう金曜まで終わっているが、EAはまだ確定として扱っていない」
-// 週がある場合だけ、その週を使った参考プレビュー用の配列を返す(なければnull)。
-// 月曜〜次の火曜の朝までの間だけこのプレビューが意味を持つ。
-function previewWeeks(allWeeks) {
-  if (allWeeks.length < 2) return null;
-  const latest = allWeeks[allWeeks.length - 1];
-  if (latest.lastDayDow !== 5) return null; // 金曜まで埋まっていなければプレビュー対象外
-  const official = officialWeeks(allWeeks);
-  if (official.length > 0 && official[official.length - 1].weekKey === latest.weekKey) return null;
-  return allWeeks; // 末尾を落とさずそのまま返す(=直近の暦完結週を含む)
-}
-
-// シグナルの有無にかかわらず、必ず判定根拠(前々週/前週の高安)を含めて返す。
-function computeWeeklySignal(weeklyBars) {
-  if (weeklyBars.length < 2) {
-    return { direction: null, insufficientData: true };
-  }
-  const prev = weeklyBars[weeklyBars.length - 1];
-  const prevPrev = weeklyBars[weeklyBars.length - 2];
-  const res = breakoutDirection(prevPrev, prev);
-  return {
-    direction: res.direction,
-    outside: res.outside,
-    prevWeek: prev,
-    prevPrevWeek: prevPrev,
-    referenceWeek: prev.weekKey,
-    todayStopTrigger: res.direction ? (res.direction === "long" ? prev.low : prev.high) : null,
-  };
-}
+// 日付・週の補助関数、Twelve Data取得、シグナル計算ロジックは
+// signal-core.js に集約済み(ファイル冒頭の分割代入を参照)。
 
 // DD逆算方式(教訓27)でロットを算出。resultはbaseLotに掛ける倍率と、丸め後ロットの両方を返す。
 function lotScaleFactor(settings) {
@@ -919,6 +670,76 @@ function initSettingsUI() {
   });
 }
 
+// ========== プッシュ通知(Web Push) ==========
+// GitHub Actions(notify/check-signals.js)が日足境界15分前(米国東部時間
+// 17:00基準、サマータイム連動)にこの購読先へ通知を送る。購読情報自体は
+// このアプリからGitHubへ自動送信する手段がない(バックエンドを持たない
+// 静的サイトのため)ので、生成したJSONをユーザーが手動でGitHub Secretsに
+// コピー&ペーストする一回限りのセットアップにしている。
+const VAPID_PUBLIC_KEY =
+  "BFeK5xi_QUu1WH3ug8D307qa6SoPHYux3LiQpoGdk2AjwZnLBQ6K5hyjjQUn7GPrrSVVynJbEsQQmq93XxpWR6I";
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; i++) outputArray[i] = rawData.charCodeAt(i);
+  return outputArray;
+}
+
+async function enablePushNotifications() {
+  const statusEl = document.getElementById("pushStatus");
+  statusEl.classList.remove("error");
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    statusEl.textContent = "この端末/ブラウザはプッシュ通知に対応していません(iPhoneはホーム画面に追加したPWAのみ対応、iOS16.4以降が必要)";
+    statusEl.classList.add("error");
+    return;
+  }
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      statusEl.textContent = "通知が許可されませんでした(端末の設定からこのアプリの通知を許可してください)";
+      statusEl.classList.add("error");
+      return;
+    }
+    const registration = await navigator.serviceWorker.ready;
+    let subscription = await registration.pushManager.getSubscription();
+    if (!subscription) {
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+      });
+    }
+    const json = JSON.stringify(subscription.toJSON());
+    const box = document.getElementById("pushSubscriptionBox");
+    const output = document.getElementById("pushSubscriptionOutput");
+    output.value = json;
+    box.classList.remove("hidden");
+    statusEl.textContent = "登録できました。下のテキストをコピーしてGitHub Secretsに保存してください。";
+  } catch (e) {
+    statusEl.textContent = `通知の登録に失敗しました: ${e.message}`;
+    statusEl.classList.add("error");
+  }
+}
+
+async function copyPushSubscription() {
+  const textarea = document.getElementById("pushSubscriptionOutput");
+  textarea.focus();
+  textarea.select();
+  try {
+    await navigator.clipboard.writeText(textarea.value);
+    const btn = document.getElementById("copyPushSubscriptionBtn");
+    const orig = btn.textContent;
+    btn.textContent = "コピーしました";
+    setTimeout(() => {
+      btn.textContent = orig;
+    }, 1500);
+  } catch (e) {
+    // クリップボードAPIが使えない端末では選択状態のまま手動コピーしてもらう
+  }
+}
+
 function init() {
   applyTheme();
   document.getElementById("themeToggle").addEventListener("click", toggleTheme);
@@ -927,6 +748,8 @@ function init() {
   document.getElementById("addPositionBtn").addEventListener("click", manualAddPosition);
   document.getElementById("entryModalCancel").addEventListener("click", closeEntryModal);
   document.getElementById("entryModalConfirm").addEventListener("click", confirmEntry);
+  document.getElementById("enablePushBtn").addEventListener("click", enablePushNotifications);
+  document.getElementById("copyPushSubscriptionBtn").addEventListener("click", copyPushSubscription);
   renderPositions(null);
 
   if ("serviceWorker" in navigator) {
