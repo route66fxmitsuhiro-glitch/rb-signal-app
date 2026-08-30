@@ -126,6 +126,7 @@ function buildPositionRecord(pairLabel, symbol, timeframe, direction, entryPrice
     entryPrice,
     R,
     tranches,
+    exitOverride: null, // ブローカー実チャートとの乖離時に手動設定する撤退ライン(nullなら自動計算値を使う)
   };
 }
 
@@ -430,7 +431,13 @@ function renderPositions(freshDataBySymbol) {
         weeklyBreak = weeklyBreakdown(lastWeekBar, fresh.daily.bars, pos.direction);
       }
     }
-    const exit = currentExitLevel(pos, stopTrigger);
+    const autoExit = currentExitLevel(pos, stopTrigger);
+    // 無料データ(Twelve Data)とブローカーの四本値には乖離が生じうるため
+    // (実例: 週足の日曜バー混入で55pipsズレたケース等)、自動計算値を
+    // ユーザーがブローカーの実チャートを見て手動で上書きできるようにする。
+    // 上書き中も自動計算値は併記し、いつでも解除できるようにする。
+    const hasOverride = pos.exitOverride != null;
+    const exit = hasOverride ? { price: pos.exitOverride, source: "手動設定" } : autoExit;
 
     const card = document.createElement("div");
     card.className = "pair-card";
@@ -441,7 +448,16 @@ function renderPositions(freshDataBySymbol) {
         <span class="badge ${badge}">${pos.timeframe === "daily" ? "日足" : "週足"} ${pos.direction === "long" ? "ロング" : "ショート"}</span>
       </div>
       <div class="pair-meta">エントリー ${pos.entryDate} @ ${fmtPrice(pos.entryPrice, pos.symbol)} / R=${fmtPrice(pos.R, pos.symbol)}</div>
-      <div class="pair-meta">現在の撤退ライン: <strong>${fmtPrice(exit.price, pos.symbol)}</strong>(${exit.source})</div>
+      <div class="pair-meta">
+        現在の撤退ライン: <strong>${fmtPrice(exit.price, pos.symbol)}</strong>(${exit.source})
+        <button class="btn btn-ghost btn-small edit-exit" data-pos="${pos.id}">編集</button>
+        ${hasOverride ? `<button class="btn btn-ghost btn-small clear-exit-override" data-pos="${pos.id}">自動に戻す</button>` : ""}
+      </div>
+      ${
+        hasOverride && autoExit.price != null
+          ? `<div class="pair-meta section-note">自動計算値(参考): ${fmtPrice(autoExit.price, pos.symbol)}(${autoExit.source})</div>`
+          : ""
+      }
       ${
         weeklyBreak
           ? `<div class="pair-meta section-note">
@@ -498,6 +514,33 @@ function renderPositions(freshDataBySymbol) {
     btn.addEventListener("click", () => {
       if (!confirm("このポジション記録を削除しますか?")) return;
       state.positions = state.positions.filter((p) => p.id !== btn.dataset.pos);
+      savePositions(state.positions);
+      renderPositions(freshDataBySymbol);
+    });
+  });
+  container.querySelectorAll(".edit-exit").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const pos = state.positions.find((p) => p.id === btn.dataset.pos);
+      const cur = pos.exitOverride != null ? pos.exitOverride : "";
+      const input = prompt(
+        `${pos.pairLabel} ${pos.direction === "long" ? "ロング" : "ショート"}の撤退ラインを手動で設定します。\nブローカーの実チャートで確認した値を入力してください。`,
+        cur !== "" ? String(cur) : ""
+      );
+      if (input == null) return; // キャンセル
+      const v = parseFloat(input);
+      if (!v || v <= 0) {
+        alert("正しい価格を入力してください");
+        return;
+      }
+      pos.exitOverride = v;
+      savePositions(state.positions);
+      renderPositions(freshDataBySymbol);
+    });
+  });
+  container.querySelectorAll(".clear-exit-override").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const pos = state.positions.find((p) => p.id === btn.dataset.pos);
+      pos.exitOverride = null;
       savePositions(state.positions);
       renderPositions(freshDataBySymbol);
     });

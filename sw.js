@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v17"; // v17: Web Pushプッシュ通知の受信処理を追加(GitHub Actionsから日足境界15分前に送信)
+const CACHE_NAME = "rb-signal-shell-v18"; // v18: 保有中ポジションの撤退ラインを手動で上書き設定できる機能を追加(app.js更新)
 const SHELL_FILES = [
   "./",
   "./index.html",
