@@ -9,7 +9,12 @@ on:
     # を判定する(該当しない方は数秒で終了するだけで実害はない)。
     - cron: "45 20 * * *" # 夏時間(EDT)用: JST 05:45頃
     - cron: "45 21 * * *" # 冬時間(EST)用: JST 06:45頃
-  workflow_dispatch: {} # 手動実行用(Actionsタブから "Run workflow" で即時テストできる。時刻判定もそのまま行われる点に注意)
+  workflow_dispatch:
+    inputs:
+      skip_time_check:
+        description: "時刻判定をスキップして即座にシグナル判定・送信を試す(動作確認用)"
+        type: boolean
+        default: false
 
 jobs:
   check-signals:
@@ -32,4 +37,5 @@ jobs:
           VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
           VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
           PUSH_SUBSCRIPTION: ${{ secrets.PUSH_SUBSCRIPTION }}
+          SKIP_TIME_CHECK: ${{ inputs.skip_time_check }}
         run: node notify/check-signals.js

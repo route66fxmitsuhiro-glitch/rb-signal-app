@@ -126,7 +126,11 @@ async function checkPair(pair, apiKey) {
 }
 
 async function main() {
-  if (!isNowTargetTime()) {
+  // 手動実行(workflow_dispatch)時にskip_time_check入力がtrueなら時刻判定を
+  // 飛ばせる(動作確認用)。スケジュール実行では常にfalseのため通常の挙動は変わらない。
+  if (process.env.SKIP_TIME_CHECK === "true") {
+    console.log("SKIP_TIME_CHECK=true のため時刻判定をスキップします(テスト実行)。");
+  } else if (!isNowTargetTime()) {
     console.log("本日の対象時刻(日足境界15分前)ではありません。何もせず終了します。");
     return;
   }
