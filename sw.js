@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v19"; // v19: 週足の entryGuard を追加(現値が撤退ラインの向こう側ならEAは新規建てしない=r≤0。app.js/signal-core.js/notify更新)
+const CACHE_NAME = "rb-signal-shell-v20"; // v20: EA照合で2件修正 - 週足集計を月曜起点方式に(月曜休場週は前週へ併合)、週足トランシェのロットをWDLite縮小(T0/T1=0.02,ride=0.01)に反映
 const SHELL_FILES = [
   "./",
   "./index.html",

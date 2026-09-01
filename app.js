@@ -36,10 +36,13 @@ const DAILY_TRANCHES = [
 ];
 
 // 週足ドンチャン(3階層)。Rはブレイク幅そのもの(ATRではない)。rideにハードストップなし(教訓34)。
+// WDLite(2026-08-31): DD削減のため各トランシェのロットを縮小。
+// EAは tierLot = RoundLot(WDLotSize/3) = RoundLot(0.10/3) = 0.03 を作り、
+// T0/T1 に ×0.667(→0.02)、ride に ×0.333(→0.01)を掛けて再度丸める2段階。lotMult がその倍率。
 const WEEKLY_TRANCHES = [
-  { name: "T0", weight: 1 / 3, targetR: 0.5 },
-  { name: "T1", weight: 1 / 3, targetR: 1.0 },
-  { name: "ride", weight: 1 / 3, targetR: null },
+  { name: "T0", weight: 1 / 3, targetR: 0.5, lotMult: 0.667 },
+  { name: "T1", weight: 1 / 3, targetR: 1.0, lotMult: 0.667 },
+  { name: "ride", weight: 1 / 3, targetR: null, lotMult: 0.333 },
 ];
 
 const BASE_LOT_DAILY = 0.10;   // バックテスト基準ロット(1ペアあたり)
@@ -97,10 +100,17 @@ function roundLot(v) {
 }
 
 function tranchesWithLots(tranches, baseLot, scale) {
-  return tranches.map((t) => ({
-    ...t,
-    lot: roundLot(baseLot * t.weight * scale),
-  }));
+  return tranches.map((t) => {
+    let lot;
+    if (t.lotMult != null) {
+      // EA(WDLite)互換: tierLot = RoundLot(baseLot * weight) を作ってから lotMult を掛けて再度丸める2段階。
+      const tierLot = roundLot(baseLot * t.weight);
+      lot = roundLot(tierLot * t.lotMult * scale);
+    } else {
+      lot = roundLot(baseLot * t.weight * scale);
+    }
+    return { ...t, lot };
+  });
 }
 
 // ========== ポジション(保有トランシェ)モデル ==========

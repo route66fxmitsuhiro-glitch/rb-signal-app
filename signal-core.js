@@ -207,27 +207,35 @@
   }
 
   // 日足バーを月曜始まりの週足に集計する。全ての週グループをそのまま返す。
+  // EA(RB12tuned)の UpdateWeeklyHistory と同じ規則で日足バーを週足に集計する。
+  // 【重要】新しい週は「月曜バーが現れたとき」だけ始まる。カレンダー上のISO週で
+  // 機械的に区切るのではない。月曜が休場(月曜バーなし)の週は、EA同様その週の
+  // 火〜金が前の週に併合される(EAの UpdateWeeklyHistory は dow==Monday の時だけ
+  // curWeek を確定・ロールオーバーし、それ以外の曜日は curWeek に加算し続けるため)。
+  // 週の open=月曜バーの始値、high/low=週内の最大/最小、close=週内最後のバーの終値。
   function aggregateWeekly(dailyBars) {
-    const groups = new Map();
-    for (const b of dailyBars) {
-      const wk = weekKeyOf(b.date);
-      if (!groups.has(wk)) groups.set(wk, []);
-      groups.get(wk).push(b);
-    }
+    const sorted = [...dailyBars].sort((a, b) => (a.date < b.date ? -1 : 1));
     const weeks = [];
-    for (const [wk, arr] of groups.entries()) {
-      arr.sort((a, b) => (a.date < b.date ? -1 : 1));
-      const lastDay = arr[arr.length - 1];
-      weeks.push({
-        weekKey: wk,
-        open: arr[0].open,
-        high: Math.max(...arr.map((x) => x.high)),
-        low: Math.min(...arr.map((x) => x.low)),
-        close: arr[arr.length - 1].close,
-        lastDayDow: dowOf(lastDay.date),
-      });
+    let cur = null;
+    let curMondayDate = null; // 現在の週を開始した月曜バーの日付(休場起点なら null)
+    for (const b of sorted) {
+      const isMonday = dowOf(b.date) === 1;
+      if (isMonday && b.date !== curMondayDate) {
+        if (cur) weeks.push(cur);
+        cur = { weekKey: b.date, open: b.open, high: b.high, low: b.low, close: b.close, lastDate: b.date, lastDayDow: 1 };
+        curMondayDate = b.date;
+      } else if (!cur) {
+        // データ先頭が月曜以外(取得窓の先頭 or 月曜休場)。EAもこれを1つの週として扱う。
+        cur = { weekKey: weekKeyOf(b.date), open: b.open, high: b.high, low: b.low, close: b.close, lastDate: b.date, lastDayDow: dowOf(b.date) };
+      } else {
+        if (b.high > cur.high) cur.high = b.high;
+        if (b.low < cur.low) cur.low = b.low;
+        cur.close = b.close;
+        cur.lastDate = b.date;
+        cur.lastDayDow = dowOf(b.date);
+      }
     }
-    weeks.sort((a, b) => (a.weekKey < b.weekKey ? -1 : 1));
+    if (cur) weeks.push(cur);
     return weeks;
   }
 
