@@ -104,6 +104,26 @@
       <p id="noPositions" class="empty-note">保有中のトランシェはまだ記録されていません。</p>
     </section>
 
+    <section id="orderCheckSection">
+      <div class="section-head">
+        <h2>注文チェック</h2>
+        <span id="orderCheckSummary" class="section-note"></span>
+      </div>
+      <p class="section-note">
+        記録済みポジションごとに「ブローカーの注文一覧にこう出ているはず」を並べます。
+        ブローカーのスマホアプリの注文一覧を見ながら、一致した項目にチェックを付けてください。
+        自動照合はしません(スクショは目視の参考用で、保存されません)。
+      </p>
+      <div class="order-shot">
+        <label class="btn btn-ghost btn-small" for="orderShotInput">スクショを貼る / 撮る</label>
+        <input id="orderShotInput" type="file" accept="image/*" hidden />
+        <button id="orderShotClear" class="btn btn-ghost btn-small hidden" type="button">スクショを消す</button>
+        <img id="orderShotPreview" class="hidden" alt="ブローカー注文一覧のスクショ" />
+      </div>
+      <div id="orderCheckCards" class="stack"></div>
+      <p id="noOrderCheck" class="empty-note">記録済みのポジションがありません。</p>
+    </section>
+
   </div>
 
   <div id="entryModal" class="modal hidden">

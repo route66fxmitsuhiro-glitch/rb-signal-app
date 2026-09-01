@@ -289,6 +289,60 @@ h2 {
 .badge.short { background: var(--negative-soft); color: var(--negative); }
 .badge.none { background: var(--neutral-soft); color: var(--neutral); }
 .badge.warn { background: var(--accent-soft); color: var(--accent); }
+.badge.ok { background: var(--positive-soft); color: var(--positive); }
+
+/* --- 注文チェック --- */
+#orderCheckSection { margin-top: 22px; }
+#orderCheckCards .pair-head { flex-wrap: wrap; justify-content: flex-start; }
+
+.order-shot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+#orderShotPreview {
+  display: block;
+  width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-top: 4px;
+}
+
+.ordercheck-list {
+  list-style: none;
+  margin: 8px 0 4px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.oc-item {
+  font-size: 0.82rem;
+  line-height: 1.5;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.oc-item:last-child { border-bottom: none; }
+.oc-item label {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  cursor: pointer;
+}
+.oc-item input[type="checkbox"] {
+  margin-top: 2px;
+  flex: none;
+  width: 18px;
+  height: 18px;
+}
+.oc-item.oc-skip {
+  color: var(--text-dim);
+  padding-left: 27px;
+}
 
 .pair-meta {
   font-family: var(--mono);

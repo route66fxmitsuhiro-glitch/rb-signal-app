@@ -152,6 +152,7 @@ function buildPositionRecord(pairLabel, symbol, timeframe, direction, entryPrice
     R,
     tranches,
     exitOverride: null, // ブローカー実チャートとの乖離時に手動設定する撤退ライン(nullなら自動計算値を使う)
+    orderCheck: {},     // 注文チェック画面でユーザーが「一致」を確認した項目キーの集合
   };
 }
 
@@ -597,6 +598,201 @@ function renderPositions(freshDataBySymbol) {
       renderPositions(freshDataBySymbol);
     });
   });
+
+  renderOrderCheck();
+}
+
+// ========== 注文チェック ==========
+// 記録済みポジションごとに「ブローカーの注文一覧にこう出ているはず」を並べ、
+// ユーザーが目視で一致を確認してチェックを付ける(自動照合はしない、A案)。
+
+// 1ポジションのチェック項目リスト。{ key, label, checkable } の配列を返す。
+function orderCheckItems(pos) {
+  const exit = pos.exitOverride != null
+    ? { price: pos.exitOverride, source: "手動設定" }
+    : currentExitLevel(pos, latestStopTriggerFor(pos));
+  const tf = pos.timeframe === "daily" ? "日足" : "週足";
+  const dir = pos.direction === "long" ? "ロング(買い)" : "ショート(売り)";
+  const nonZero = pos.tranches.filter((t) => t.lot > 0);
+  const items = [];
+
+  items.push({
+    key: "entry",
+    checkable: true,
+    label: `${tf} ${dir} を成行で ${nonZero.length} 本(別々の建玉)。約定 ≈ ${fmtPrice(pos.entryPrice, pos.symbol)}(スプレッド分ずれます)`,
+  });
+
+  for (const t of pos.tranches) {
+    if (t.lot <= 0) {
+      items.push({ key: `t:${t.name}`, checkable: false, label: `${t.name}: 枚数0 → 発注不要(資金/DD設定でこのトランシェは出ません)` });
+      continue;
+    }
+    const tp = targetPrice(pos, t);
+    const tail = tp != null
+      ? `利食い指値 @ ${fmtPrice(tp, pos.symbol)}`
+      : `利食い指値なし(撤退ラインまで保有 = ride)`;
+    items.push({ key: `t:${t.name}`, checkable: true, label: `${t.name}: ${fmtMai(t.lot)}枚 / ${tail}` });
+  }
+
+  items.push({
+    key: "stop",
+    checkable: true,
+    label: exit.price != null
+      ? `撤退ライン @ ${fmtPrice(exit.price, pos.symbol)}(${exit.source})。逆指値を置くなら全建玉に。毎日ずれるので置いたら翌朝に更新。`
+      : `撤退ライン: 「本日の判定を取得」を押すと表示されます`,
+  });
+
+  return items;
+}
+
+// renderPositions と同じ方法で、そのポジションの撤退ライン計算用トリガー値を出す。
+function latestStopTriggerFor(pos) {
+  const fresh = state.lastFetch ? state.lastFetch[pos.symbol] : null;
+  if (!fresh) return null;
+  if (pos.timeframe === "daily") {
+    const b = fresh.daily.bars[fresh.daily.bars.length - 1];
+    return pos.direction === "long" ? b.low : b.high;
+  }
+  if (fresh.weekly.bars.length) {
+    const b = fresh.weekly.bars[fresh.weekly.bars.length - 1];
+    return pos.direction === "long" ? b.low : b.high;
+  }
+  return null;
+}
+
+function renderOrderCheck() {
+  const container = document.getElementById("orderCheckCards");
+  const empty = document.getElementById("noOrderCheck");
+  const summary = document.getElementById("orderCheckSummary");
+  if (!container) return;
+  container.innerHTML = "";
+  const open = state.positions.filter((p) => p.tranches.some((t) => !t.closed));
+  empty.classList.toggle("hidden", open.length > 0);
+
+  let totalItems = 0;
+  let totalChecked = 0;
+
+  for (const pos of open) {
+    if (!pos.orderCheck) pos.orderCheck = {};
+    const items = orderCheckItems(pos);
+    const checkable = items.filter((it) => it.checkable);
+    const checked = checkable.filter((it) => pos.orderCheck[it.key]);
+    totalItems += checkable.length;
+    totalChecked += checked.length;
+    const allOk = checkable.length > 0 && checked.length === checkable.length;
+
+    const card = document.createElement("div");
+    card.className = "pair-card";
+    const badge = pos.direction === "long" ? "long" : "short";
+    let html = `
+      <div class="pair-head">
+        <span class="pair-name">${pos.pairLabel}</span>
+        <span class="badge ${badge}">${pos.timeframe === "daily" ? "日足" : "週足"} ${pos.direction === "long" ? "ロング" : "ショート"}</span>
+        <span class="badge ${allOk ? "ok" : "warn"}">${allOk ? "一致確認済み" : `未確認 ${checkable.length - checked.length} 件`}</span>
+      </div>
+      <div class="pair-meta section-note">記録: ${pos.entryDate} @ ${fmtPrice(pos.entryPrice, pos.symbol)} / R=${fmtPrice(pos.R, pos.symbol)}</div>
+      <ul class="ordercheck-list">
+    `;
+    for (const it of items) {
+      if (!it.checkable) {
+        html += `<li class="oc-item oc-skip">${it.label}</li>`;
+        continue;
+      }
+      const on = !!pos.orderCheck[it.key];
+      html += `<li class="oc-item">
+        <label>
+          <input type="checkbox" class="oc-toggle" data-pos="${pos.id}" data-key="${it.key}" ${on ? "checked" : ""} />
+          <span>${it.label}</span>
+        </label>
+      </li>`;
+    }
+    html += `</ul>
+      <div class="pair-actions">
+        <button class="btn btn-ghost btn-small oc-all" data-pos="${pos.id}">全部チェック</button>
+        <button class="btn btn-ghost btn-small oc-clear" data-pos="${pos.id}">クリア</button>
+      </div>`;
+    card.innerHTML = html;
+    container.appendChild(card);
+  }
+
+  if (summary) {
+    summary.textContent = open.length ? `確認 ${totalChecked} / ${totalItems} 項目` : "";
+  }
+
+  container.querySelectorAll(".oc-toggle").forEach((cb) => {
+    cb.addEventListener("change", () => {
+      const pos = state.positions.find((p) => p.id === cb.dataset.pos);
+      if (!pos) return;
+      if (!pos.orderCheck) pos.orderCheck = {};
+      if (cb.checked) pos.orderCheck[cb.dataset.key] = true;
+      else delete pos.orderCheck[cb.dataset.key];
+      savePositions(state.positions);
+      renderOrderCheck();
+    });
+  });
+  container.querySelectorAll(".oc-all").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const pos = state.positions.find((p) => p.id === btn.dataset.pos);
+      if (!pos) return;
+      pos.orderCheck = {};
+      for (const it of orderCheckItems(pos)) if (it.checkable) pos.orderCheck[it.key] = true;
+      savePositions(state.positions);
+      renderOrderCheck();
+    });
+  });
+  container.querySelectorAll(".oc-clear").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const pos = state.positions.find((p) => p.id === btn.dataset.pos);
+      if (!pos) return;
+      pos.orderCheck = {};
+      savePositions(state.positions);
+      renderOrderCheck();
+    });
+  });
+}
+
+// スクショ(目視の参考用)。sessionStorageに1枚だけ保持(タブを閉じると消える)。
+const LS_ORDERSHOT = "rbsignal_ordershot_v1";
+
+function showOrderShot(dataUrl) {
+  const img = document.getElementById("orderShotPreview");
+  const clr = document.getElementById("orderShotClear");
+  if (!img) return;
+  if (dataUrl) {
+    img.src = dataUrl;
+    img.classList.remove("hidden");
+    clr.classList.remove("hidden");
+  } else {
+    img.removeAttribute("src");
+    img.classList.add("hidden");
+    clr.classList.add("hidden");
+  }
+}
+
+function initOrderShotUI() {
+  const input = document.getElementById("orderShotInput");
+  const clr = document.getElementById("orderShotClear");
+  if (!input) return;
+  try {
+    const saved = sessionStorage.getItem(LS_ORDERSHOT);
+    if (saved) showOrderShot(saved);
+  } catch (e) {}
+  input.addEventListener("change", () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = reader.result;
+      showOrderShot(url);
+      try { sessionStorage.setItem(LS_ORDERSHOT, url); } catch (e) {}
+    };
+    reader.readAsDataURL(file);
+    input.value = "";
+  });
+  clr.addEventListener("click", () => {
+    showOrderShot(null);
+    try { sessionStorage.removeItem(LS_ORDERSHOT); } catch (e) {}
+  });
 }
 
 // ========== エントリー記録モーダル ==========
@@ -903,6 +1099,7 @@ function init() {
   document.getElementById("entryModalConfirm").addEventListener("click", confirmEntry);
   document.getElementById("enablePushBtn").addEventListener("click", enablePushNotifications);
   document.getElementById("copyPushSubscriptionBtn").addEventListener("click", copyPushSubscription);
+  initOrderShotUI();
   renderPositions(null);
 
   if ("serviceWorker" in navigator) {

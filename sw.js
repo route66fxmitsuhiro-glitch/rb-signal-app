@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v21"; // v21: 設定のUSD/JPYレートを前日終値から自動取得(チェックボックスで手動切替可)
+const CACHE_NAME = "rb-signal-shell-v22"; // v22: 注文チェック画面を追加(記録どおりに発注できているか目視チェック用リスト+スクショ参照)
 const SHELL_FILES = [
   "./",
   "./index.html",
