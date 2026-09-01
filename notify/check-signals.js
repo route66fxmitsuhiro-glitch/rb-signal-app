@@ -101,7 +101,7 @@ async function checkPair(pair, apiKey) {
 
   const allWeeklyBars = aggregateWeekly(bars);
   const weeklyBars = officialWeeks(allWeeklyBars);
-  const weeklySignal = computeWeeklySignal(weeklyBars);
+  const weeklySignal = computeWeeklySignal(weeklyBars, bars.length ? bars[bars.length - 1] : null);
   // 週足シグナルは「本日が新規判定日(直前の完成日足バーが月曜)」の時だけ
   // 通知対象にする。そうしないと、同じ週足シグナルが確定してから次の
   // 月曜の足が閉じるまで(最大1週間)毎回同じ内容を通知し続けてしまう。
@@ -115,11 +115,21 @@ async function checkPair(pair, apiKey) {
         ` [前日高${fmtPrice(dailySignal.prevBar.high, pair.symbol)}/安${fmtPrice(dailySignal.prevBar.low, pair.symbol)} ATR14=${fmtPrice(atr14, pair.symbol)}]`
     );
   }
-  if (weeklyIsNewToday && weeklySignal && weeklySignal.direction) {
+  // entryGuard.vetoed(直近日足の終値が撤退ラインの向こう側 = EAの r>0 ガードで
+  // 新規建てが見送られる見込み)の時は通知しない。
+  const weeklyVetoed = weeklySignal && weeklySignal.entryGuard && weeklySignal.entryGuard.vetoed;
+  if (weeklyIsNewToday && weeklySignal && weeklySignal.direction && !weeklyVetoed) {
     lines.push(
       `${pair.label} 週足${dirLabel(weeklySignal.direction)}` +
         (weeklySignal.outside ? "(アウトサイド週)" : "") +
+        (weeklySignal.entryGuard ? "(撤退ライン一時越え・要注意)" : "") +
         ` [前週高${fmtPrice(weeklySignal.prevWeek.high, pair.symbol)}/安${fmtPrice(weeklySignal.prevWeek.low, pair.symbol)}]`
+    );
+  } else if (weeklyIsNewToday && weeklyVetoed) {
+    console.log(
+      `${pair.label} 週足${dirLabel(weeklySignal.direction)}シグナルは entryGuard で通知抑制(` +
+        `直近日足${weeklySignal.entryGuard.barDate}の終値が前週` +
+        `${weeklySignal.entryGuard.direction === "long" ? "安値" : "高値"}を越え、EAは新規建て見送り見込み)`
     );
   }
   return lines;

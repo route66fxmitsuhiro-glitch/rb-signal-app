@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v18"; // v18: 保有中ポジションの撤退ラインを手動で上書き設定できる機能を追加(app.js更新)
+const CACHE_NAME = "rb-signal-shell-v19"; // v19: 週足の entryGuard を追加(現値が撤退ラインの向こう側ならEAは新規建てしない=r≤0。app.js/signal-core.js/notify更新)
 const SHELL_FILES = [
   "./",
   "./index.html",

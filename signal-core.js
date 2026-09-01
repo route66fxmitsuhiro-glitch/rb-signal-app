@@ -248,20 +248,51 @@
   }
 
   // シグナルの有無にかかわらず、必ず判定根拠(前々週/前週の高安)を含めて返す。
-  function computeWeeklySignal(weeklyBars) {
+  //
+  // latestDailyBar(任意): 直近の完成日足バー(新規判定日=通常火曜なら「月曜の足」)。
+  // 渡すと entryGuard を計算する。EAの RunWeeklyDonchianSignals は
+  //   ep = 火曜始値;  r = ep - 前週安値(ロング) / 前週高値 - ep(ショート);  if (r > 0) だけ新規建て
+  // という順張り回避ガードを持つ。火曜始値はまだ取得できないため、直前の完成日足バー
+  // (通常は月曜)で近似判定する。月曜が撤退ライン(前週安値/高値)を終値で越えていれば
+  // 火曜始値もその向こう側になる可能性が高く、EAは新規建てを見送る(vetoed=true)。
+  // ヒゲだけ越えて終値は戻した場合は「火曜始値次第で見送りうる」警告(kind="wick")。
+  function computeWeeklySignal(weeklyBars, latestDailyBar) {
     if (weeklyBars.length < 2) {
       return { direction: null, insufficientData: true };
     }
     const prev = weeklyBars[weeklyBars.length - 1];
     const prevPrev = weeklyBars[weeklyBars.length - 2];
     const res = breakoutDirection(prevPrev, prev);
+    const stopLevel = res.direction
+      ? (res.direction === "long" ? prev.low : prev.high)
+      : null;
+
+    let entryGuard = null;
+    if (res.direction && stopLevel != null && latestDailyBar) {
+      const b = latestDailyBar;
+      if (res.direction === "long") {
+        if (b.close < stopLevel) {
+          entryGuard = { vetoed: true, kind: "close", direction: "long", level: stopLevel, barDate: b.date, barValue: b.close };
+        } else if (b.low < stopLevel) {
+          entryGuard = { vetoed: false, kind: "wick", direction: "long", level: stopLevel, barDate: b.date, barValue: b.low };
+        }
+      } else {
+        if (b.close > stopLevel) {
+          entryGuard = { vetoed: true, kind: "close", direction: "short", level: stopLevel, barDate: b.date, barValue: b.close };
+        } else if (b.high > stopLevel) {
+          entryGuard = { vetoed: false, kind: "wick", direction: "short", level: stopLevel, barDate: b.date, barValue: b.high };
+        }
+      }
+    }
+
     return {
       direction: res.direction,
       outside: res.outside,
       prevWeek: prev,
       prevPrevWeek: prevPrev,
       referenceWeek: prev.weekKey,
-      todayStopTrigger: res.direction ? (res.direction === "long" ? prev.low : prev.high) : null,
+      todayStopTrigger: stopLevel,
+      entryGuard,
     };
   }
 

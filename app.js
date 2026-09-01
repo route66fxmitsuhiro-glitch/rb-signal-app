@@ -232,6 +232,24 @@ function fmtMai(lot) {
 // 暦の上ではもう金曜まで終わっているがEAではまだ確定していない週がある
 // 場合(主に月曜〜火曜朝)、その週を使った場合の参考プレビューをHTMLで返す。
 // なければ空文字。
+// 週足の entryGuard(EAの r>0 ガードの近似判定)を人間向けの1行に整形する。
+// vetoed=true なら「EAは新規建てしない」、kind="wick" なら「要注意」。
+function weeklyGuardHtml(guard, symbol) {
+  if (!guard) return "";
+  const lvlName = guard.direction === "long" ? "安値" : "高値";
+  const verb = guard.direction === "long" ? "割り込み" : "上抜け";
+  const what = guard.kind === "close" ? "終値" : lvlName;
+  const msg =
+    `直近日足(${guard.barDate})の${what} ${fmtPrice(guard.barValue, symbol)} が ` +
+    `前週${lvlName} ${fmtPrice(guard.level, symbol)} を${verb}`;
+  if (guard.vetoed) {
+    return `<p class="section-note"><strong>${msg}。</strong>
+      現値が撤退ラインの向こう側にあるため、EAはこの週の新規建てを見送ります(r≤0)。</p>`;
+  }
+  return `<p class="section-note">${msg}(終値は戻す)。
+    火曜の始値が撤退ラインの外側で寄れば、EAはこの週の新規建てを見送ります。</p>`;
+}
+
 function renderWeeklyPreview(previewSignal, symbol) {
   if (!previewSignal || !previewSignal.direction) return "";
   const badge = previewSignal.direction === "long" ? "long" : "short";
@@ -239,7 +257,9 @@ function renderWeeklyPreview(previewSignal, symbol) {
     <div class="pair-meta">
       <span class="badge ${badge}">参考プレビュー: ${previewSignal.direction === "long" ? "ロング" : "ショート"}</span>
       (直近の暦完結週を含めた場合。まだEA未確定、火曜になれば正式判定に切り替わる)
+      ${previewSignal.entryGuard && previewSignal.entryGuard.vetoed ? '<span class="badge short">この状況ならEAは見送り</span>' : ""}
     </div>
+    ${weeklyGuardHtml(previewSignal.entryGuard, symbol)}
     <div class="pair-meta">
       根拠: 前々週(${previewSignal.prevPrevWeek.weekKey}週) 高${fmtPrice(previewSignal.prevPrevWeek.high, symbol)}/安${fmtPrice(previewSignal.prevPrevWeek.low, symbol)}
       → 前週(${previewSignal.prevWeek.weekKey}週) 高${fmtPrice(previewSignal.prevWeek.high, symbol)}/安${fmtPrice(previewSignal.prevWeek.low, symbol)}
@@ -343,8 +363,11 @@ function renderSignals(results) {
           ${isNewToday ? '<span class="badge warn">本日が新規判定日</span>' : '<span class="badge none">新規判定日は前回の月曜明け(通常火曜)</span>'}
           ${wsig.outside ? '<span class="badge warn">アウトサイド週(前週終値で一本化)</span>' : ""}
           ${alreadyOpenWeekly ? '<span class="badge warn">既に保有中(EAは新規建てしない)</span>' : ""}
+          ${wsig.entryGuard && wsig.entryGuard.vetoed ? '<span class="badge short">EA新規建て見送り(R≤0)</span>' : ""}
+          ${wsig.entryGuard && !wsig.entryGuard.vetoed ? '<span class="badge warn">撤退ラインを一時越え・要注意</span>' : ""}
           R(参考値、約定前の概算)=${fmtPrice(rApprox, r.symbol)}
         </div>
+        ${weeklyGuardHtml(wsig.entryGuard, r.symbol)}
         <p class="section-note">
           実際のR = 約定価格 - 前週安値(ロング)/前週高値 - 約定価格(ショート)。
           「このシグナルを記録」で実際の約定価格を入力すると正しいRに置き換わります。
@@ -372,6 +395,10 @@ function renderSignals(results) {
             ? `<p class="section-note">同じペア・方向のトランシェを既に保有中です。EA(RB12tuned)は
                <code>WDAnyOpen()</code>により、そのトランシェが全て決済されるまで同方向の新規シグナルを
                取りません。ここで改めて記録しないでください。</p>`
+            : isNewToday && wsig.entryGuard && wsig.entryGuard.vetoed
+            ? `<p class="section-note">現値が撤退ライン(前週${wsig.direction === "long" ? "安値" : "高値"})を既に越えているため、
+               EA(RB12tuned)はこの週の新規建てを見送ります(<code>r = 火曜始値 − 前週${wsig.direction === "long" ? "安値" : "高値"}</code>が
+               0以下になるため)。記録しないでください。火曜の始値が撤退ラインの内側に戻れば建てる可能性はあります。</p>`
             : isNewToday
             ? `<button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
                  data-timeframe="weekly" data-direction="${wsig.direction}"
@@ -645,11 +672,14 @@ async function fetchAndRender() {
       const dailySignal = computeDailySignal(bars);
       const allWeeklyBars = aggregateWeekly(bars);
       const weeklyBars = officialWeeks(allWeeklyBars);
-      const weeklySignal = computeWeeklySignal(weeklyBars);
+      // 直近の完成日足バー(新規判定日=通常火曜なら「月曜の足」)を渡して
+      // entryGuard(EAの r>0 ガードの近似判定)を計算させる。
+      const latestDailyBar = bars.length ? bars[bars.length - 1] : null;
+      const weeklySignal = computeWeeklySignal(weeklyBars, latestDailyBar);
       // 暦の上ではもう金曜まで終わっているがEAはまだ確定として扱っていない
       // 週がある場合(月曜〜火曜朝によくある)、参考プレビューも計算する。
       const pvWeeks = previewWeeks(allWeeklyBars);
-      const previewSignal = pvWeeks ? computeWeeklySignal(pvWeeks) : null;
+      const previewSignal = pvWeeks ? computeWeeklySignal(pvWeeks, latestDailyBar) : null;
       const r = {
         symbol: p.symbol,
         label: p.label,
