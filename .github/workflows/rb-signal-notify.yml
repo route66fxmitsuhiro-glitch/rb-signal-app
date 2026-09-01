@@ -2,19 +2,35 @@ name: RBシグナル通知
 
 on:
   schedule:
-    # 日足境界(米国東部時間17:00)の15分前=16:45 America/New_York。
-    # サマータイム(EDT, UTC-4)ならUTC20:45、冬時間(EST, UTC-5)ならUTC21:45。
-    # GitHub Actionsのcronはサマータイムに連動しないため、両方の時刻で
-    # 毎日起動し、check-signals.js自身が「今日、実際にどちらが対象時刻か」
-    # を判定する(該当しない方は数秒で終了するだけで実害はない)。
-    - cron: "45 20 * * *" # 夏時間(EDT)用: JST 05:45頃
-    - cron: "45 21 * * *" # 冬時間(EST)用: JST 06:45頃
+    # FXの新しい取引日は NY 17:00 に始まる(EDT=UTC 21:00 / EST=UTC 22:00)。
+    # GitHub の scheduled 実行は混雑時に数時間遅延する(実測3時間)ため、
+    # UTC 20:30〜01:00 の間に30分おきで何度も起動し、check-signals.js が
+    # 「直近NY境界の-30分〜+8時間」内なら処理、notify/last-run.json の
+    # 処理済みフラグで通知は取引日ごとに1回だけに制御する。
+    - cron: "30 20 * * *"
+    - cron: "0 21 * * *"
+    - cron: "30 21 * * *"
+    - cron: "0 22 * * *"
+    - cron: "30 22 * * *"
+    - cron: "0 23 * * *"
+    - cron: "30 23 * * *"
+    - cron: "0 0 * * *"
+    - cron: "30 0 * * *"
+    - cron: "0 1 * * *"
   workflow_dispatch:
     inputs:
       skip_time_check:
-        description: "時刻判定をスキップして即座にシグナル判定・送信を試す(動作確認用)"
+        description: "時刻判定・処理済みフラグをスキップして即座にシグナル判定・送信を試す(動作確認用)"
         type: boolean
         default: false
+
+# 遅延した複数の実行が同時に走って last-run.json のコミットで競合しないよう直列化する。
+concurrency:
+  group: rb-signal-notify
+  cancel-in-progress: false
+
+permissions:
+  contents: write
 
 jobs:
   check-signals:
@@ -22,6 +38,9 @@ jobs:
     steps:
       - name: リポジトリを取得
         uses: actions/checkout@v4
+
+      - name: 最新の処理済みフラグを取得
+        run: git pull --no-rebase --no-edit origin main || true
 
       - name: Node.jsをセットアップ
         uses: actions/setup-node@v4
@@ -39,3 +58,20 @@ jobs:
           PUSH_SUBSCRIPTION: ${{ secrets.PUSH_SUBSCRIPTION }}
           SKIP_TIME_CHECK: ${{ inputs.skip_time_check }}
         run: node notify/check-signals.js
+
+      - name: 処理済みフラグをコミット
+        if: ${{ github.event.inputs.skip_time_check != 'true' }}
+        run: |
+          git add notify/last-run.json
+          if git diff --cached --quiet; then
+            echo "last-run.json に変更なし。コミットしません。"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "notify: 処理済みフラグ更新 [skip ci]"
+          for i in 1 2 3; do
+            git pull --rebase --no-edit origin main && git push && exit 0
+            echo "push 失敗、リトライ $i"; sleep 5
+          done
+          echo "::warning::last-run.json の push に失敗しました(次回起動で再取得されます)"
