@@ -45,10 +45,15 @@
           <span>DD許容度(%)</span>
           <input id="ddPct" type="number" inputmode="numeric" value="20" min="1" max="90" step="1" />
         </label>
+        <label class="field field-check">
+          <input id="usdJpyAuto" type="checkbox" checked />
+          <span>USD/JPYを前日終値から自動取得</span>
+        </label>
         <label class="field">
-          <span>USD/JPYレート(概算)</span>
+          <span>USD/JPYレート</span>
           <input id="usdJpy" type="number" inputmode="decimal" value="150" min="1" step="0.5" />
         </label>
+        <p id="usdJpyAutoNote" class="field-note"></p>
         <p class="field-note">
           数量は「年間利益÷最大DD比率」方式(教訓27)で計算し、1枚=10,000通貨換算で「枚」表示します。基準最大DD $3,369.33(コア単体の実データ)を、
           運用資金×DD許容度から逆算したUSD建てDD予算でスケーリングします。

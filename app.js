@@ -63,7 +63,12 @@ const LS_THEME = "rbsignal_theme_v1";
 
 function loadSettings() {
   const raw = localStorage.getItem(LS_SETTINGS);
-  const defaults = { apiKey: "", capitalJpy: 3000000, ddPct: 20, usdJpy: 150 };
+  const defaults = {
+    apiKey: "", capitalJpy: 3000000, ddPct: 20, usdJpy: 150,
+    usdJpyAuto: true,       // USD/JPYレートを前日終値から自動取得する
+    usdJpyCached: null,     // 直近の取得値(セッションをまたいでロット計算に使う)
+    usdJpyCachedDate: null,
+  };
   if (!raw) return defaults;
   try { return { ...defaults, ...JSON.parse(raw) }; } catch { return defaults; }
 }
@@ -85,9 +90,19 @@ function savePositions(list) {
 // 日付・週の補助関数、Twelve Data取得、シグナル計算ロジックは
 // signal-core.js に集約済み(ファイル冒頭の分割代入を参照)。
 
+// 有効なUSD/JPYレート。自動ONなら「今回取得した前日終値(なければ前回キャッシュ)」、
+// OFFなら手動入力値。用途はロットサイジングのJPY→USD換算だけなので前日終値で十分。
+function effectiveUsdJpy(settings) {
+  if (settings.usdJpyAuto) {
+    const auto = (state.autoUsdJpy && state.autoUsdJpy.rate) || settings.usdJpyCached;
+    if (auto && auto > 0) return auto;
+  }
+  return settings.usdJpy || 150;
+}
+
 // DD逆算方式(教訓27)でロットを算出。resultはbaseLotに掛ける倍率と、丸め後ロットの両方を返す。
 function lotScaleFactor(settings) {
-  const ddBudgetUsd = (settings.capitalJpy / settings.usdJpy) * (settings.ddPct / 100);
+  const ddBudgetUsd = (settings.capitalJpy / effectiveUsdJpy(settings)) * (settings.ddPct / 100);
   return ddBudgetUsd / REFERENCE_MAX_DD_USD;
 }
 
@@ -188,7 +203,7 @@ function currentExitLevel(pos, latestStopTrigger) {
 
 // ========== レンダリング ==========
 
-const state = { settings: loadSettings(), positions: loadPositions(), lastFetch: null };
+const state = { settings: loadSettings(), positions: loadPositions(), lastFetch: null, lastResults: null, autoUsdJpy: null };
 
 // EAの AnyOpen()/WDAnyOpen() 相当。同じペア・時間軸・方向のトランシェが
 // 1つでも未決済で残っている間、EAは新しいブレイクアウトが成立しても
@@ -699,7 +714,20 @@ async function fetchAndRender() {
       results.push(r);
       freshBySymbol[p.symbol] = r;
     }
+    // USD/JPY の前日終値を自動レートとして保持(ロットサイジングのJPY→USD換算用)。
+    const ujFresh = freshBySymbol["USD/JPY"];
+    if (ujFresh && ujFresh.daily.bars.length) {
+      const b = ujFresh.daily.bars[ujFresh.daily.bars.length - 1];
+      state.autoUsdJpy = { rate: b.close, date: b.date };
+      if (state.settings.usdJpyAuto) {
+        state.settings.usdJpyCached = b.close;
+        state.settings.usdJpyCachedDate = b.date;
+        saveSettings(state.settings);
+      }
+      if (typeof syncUsdJpyField === "function") syncUsdJpyField();
+    }
     state.lastFetch = freshBySymbol;
+    state.lastResults = results;
     renderSignals(results);
     renderPositions(freshBySymbol);
     statusEl.textContent = `取得完了(${new Date().toLocaleString("ja-JP")})`;
@@ -725,12 +753,48 @@ function toggleTheme() {
   localStorage.setItem(LS_THEME, next);
 }
 
+// USD/JPY入力欄の見た目を現在のモード(自動/手動)に合わせる。
+function syncUsdJpyField() {
+  const s = state.settings;
+  const chk = document.getElementById("usdJpyAuto");
+  const inp = document.getElementById("usdJpy");
+  const note = document.getElementById("usdJpyAutoNote");
+  if (!chk || !inp) return;
+  chk.checked = !!s.usdJpyAuto;
+  inp.disabled = !!s.usdJpyAuto;
+  const r = (state.autoUsdJpy && state.autoUsdJpy.rate) || s.usdJpyCached;
+  const d = (state.autoUsdJpy && state.autoUsdJpy.date) || s.usdJpyCachedDate;
+  if (s.usdJpyAuto) {
+    if (r) {
+      inp.value = Number(r).toFixed(3);
+      if (note) note.textContent = `自動: ${Number(r).toFixed(3)}(${d} 終値)。「取得」のたびに更新されます。`;
+    } else if (note) {
+      note.textContent = "「取得」を押すと USD/JPY の前日終値が入ります(それまでは手動値を使用)。";
+    }
+  } else if (note) {
+    note.textContent = "手動入力値を使用します。";
+  }
+}
+
 function initSettingsUI() {
   const s = state.settings;
   document.getElementById("apiKey").value = s.apiKey;
   document.getElementById("capitalJpy").value = s.capitalJpy;
   document.getElementById("ddPct").value = s.ddPct;
-  document.getElementById("usdJpy").value = s.usdJpy;
+  document.getElementById("usdJpy").value = s.usdJpyCached || s.usdJpy;
+  syncUsdJpyField();
+
+  document.getElementById("usdJpyAuto").addEventListener("change", (e) => {
+    state.settings.usdJpyAuto = e.target.checked;
+    if (!e.target.checked) {
+      const r = (state.autoUsdJpy && state.autoUsdJpy.rate) || state.settings.usdJpyCached || state.settings.usdJpy;
+      document.getElementById("usdJpy").value = Number(r).toFixed(2);
+    }
+    saveSettings(state.settings);
+    syncUsdJpyField();
+    if (state.lastResults) renderSignals(state.lastResults);
+    if (state.lastFetch) renderPositions(state.lastFetch);
+  });
 
   document.getElementById("settingsToggle").addEventListener("click", () => {
     const body = document.getElementById("settingsBody");
@@ -745,8 +809,14 @@ function initSettingsUI() {
       capitalJpy: parseFloat(document.getElementById("capitalJpy").value) || 0,
       ddPct: parseFloat(document.getElementById("ddPct").value) || 0,
       usdJpy: parseFloat(document.getElementById("usdJpy").value) || 150,
+      usdJpyAuto: document.getElementById("usdJpyAuto").checked,
+      usdJpyCached: state.settings.usdJpyCached,
+      usdJpyCachedDate: state.settings.usdJpyCachedDate,
     };
     saveSettings(state.settings);
+    syncUsdJpyField();
+    if (state.lastResults) renderSignals(state.lastResults);
+    if (state.lastFetch) renderPositions(state.lastFetch);
     const flag = document.getElementById("settingsSaved");
     flag.classList.remove("hidden");
     setTimeout(() => flag.classList.add("hidden"), 2000);
