@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v22"; // v22: 注文チェック画面を追加(記録どおりに発注できているか目視チェック用リスト+スクショ参照)
+const CACHE_NAME = "rb-signal-shell-v23"; // v23: 注文チェックにAI自動照合を追加(Anthropic Messages APIを端末から直接呼び、スクショと期待注文を照合)
 const SHELL_FILES = [
   "./",
   "./index.html",

@@ -38,6 +38,22 @@
           <input id="apiKey" type="text" placeholder="無料登録して取得したキーを貼り付け" autocomplete="off" />
         </label>
         <label class="field">
+          <span>Anthropic APIキー(注文チェックのAI照合用・任意)</span>
+          <input id="anthropicKey" type="password" placeholder="sk-ant-... (未入力ならAI照合は使えません)" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span>AI照合モデル</span>
+          <select id="visionModel">
+            <option value="claude-opus-5">Claude Opus 5(最精度・約3〜5円/回)</option>
+            <option value="claude-sonnet-5">Claude Sonnet 5(中間・約2〜3円/回)</option>
+            <option value="claude-haiku-4-5">Claude Haiku 4.5(安価・1円未満/回)</option>
+          </select>
+        </label>
+        <p class="field-note">
+          Anthropicキーはこの端末のブラウザにのみ保存され、照合時に画像とともに api.anthropic.com へ直接送られます
+          (キーがブラウザに置かれるため、使い捨て or 低予算上限のキーを推奨)。スクショはAnthropicに送信されます。
+        </p>
+        <label class="field">
           <span>運用資金(円)</span>
           <input id="capitalJpy" type="number" inputmode="numeric" value="3000000" min="0" step="10000" />
         </label>
@@ -118,8 +134,10 @@
         <label class="btn btn-ghost btn-small" for="orderShotInput">スクショを貼る / 撮る</label>
         <input id="orderShotInput" type="file" accept="image/*" hidden />
         <button id="orderShotClear" class="btn btn-ghost btn-small hidden" type="button">スクショを消す</button>
+        <button id="ocAiBtn" class="btn btn-secondary btn-small hidden" type="button">AIで自動照合</button>
         <img id="orderShotPreview" class="hidden" alt="ブローカー注文一覧のスクショ" />
       </div>
+      <p id="ocAiStatus" class="field-note"></p>
       <div id="orderCheckCards" class="stack"></div>
       <p id="noOrderCheck" class="empty-note">記録済みのポジションがありません。</p>
     </section>

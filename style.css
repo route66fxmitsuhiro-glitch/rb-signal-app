@@ -344,6 +344,38 @@ h2 {
   padding-left: 27px;
 }
 
+.oc-verdict {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.v-match { background: var(--positive-soft); color: var(--positive); }
+.v-mismatch { background: var(--negative-soft); color: var(--negative); }
+.v-nf { background: var(--accent-soft); color: var(--accent); }
+.v-unclear { background: var(--neutral-soft); color: var(--neutral); }
+
+.oc-ai-detail {
+  font-size: 0.74rem;
+  color: var(--text-dim);
+  padding-left: 27px;
+  margin-top: 2px;
+}
+.oc-ai-meta { border-color: var(--accent); }
+
+.field select {
+  font-family: inherit;
+  font-size: 0.95rem;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+
 .pair-meta {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;

@@ -68,6 +68,8 @@ function loadSettings() {
     usdJpyAuto: true,       // USD/JPYレートを前日終値から自動取得する
     usdJpyCached: null,     // 直近の取得値(セッションをまたいでロット計算に使う)
     usdJpyCachedDate: null,
+    anthropicKey: "",       // 注文チェックのAI照合用(任意)。この端末にのみ保存。
+    visionModel: "claude-opus-5",
   };
   if (!raw) return defaults;
   try { return { ...defaults, ...JSON.parse(raw) }; } catch { return defaults; }
@@ -204,7 +206,7 @@ function currentExitLevel(pos, latestStopTrigger) {
 
 // ========== レンダリング ==========
 
-const state = { settings: loadSettings(), positions: loadPositions(), lastFetch: null, lastResults: null, autoUsdJpy: null };
+const state = { settings: loadSettings(), positions: loadPositions(), lastFetch: null, lastResults: null, autoUsdJpy: null, orderShot: null, orderCheckAiMeta: null };
 
 // EAの AnyOpen()/WDAnyOpen() 相当。同じペア・時間軸・方向のトランシェが
 // 1つでも未決済で残っている間、EAは新しいブレイクアウトが成立しても
@@ -693,17 +695,26 @@ function renderOrderCheck() {
       <div class="pair-meta section-note">記録: ${pos.entryDate} @ ${fmtPrice(pos.entryPrice, pos.symbol)} / R=${fmtPrice(pos.R, pos.symbol)}</div>
       <ul class="ordercheck-list">
     `;
+    const ai = pos.orderCheckAi || {};
+    const AI_BADGE = {
+      match: '<span class="oc-verdict v-match">AI:一致</span>',
+      mismatch: '<span class="oc-verdict v-mismatch">AI:不一致</span>',
+      not_found: '<span class="oc-verdict v-nf">AI:見当たらず</span>',
+      unclear: '<span class="oc-verdict v-unclear">AI:判別不可</span>',
+    };
     for (const it of items) {
       if (!it.checkable) {
         html += `<li class="oc-item oc-skip">${it.label}</li>`;
         continue;
       }
       const on = !!pos.orderCheck[it.key];
+      const v = ai[it.key];
       html += `<li class="oc-item">
         <label>
           <input type="checkbox" class="oc-toggle" data-pos="${pos.id}" data-key="${it.key}" ${on ? "checked" : ""} />
-          <span>${it.label}</span>
+          <span>${it.label}${v ? " " + (AI_BADGE[v.verdict] || "") : ""}</span>
         </label>
+        ${v && v.detail ? `<div class="oc-ai-detail">${v.detail}</div>` : ""}
       </li>`;
     }
     html += `</ul>
@@ -713,6 +724,20 @@ function renderOrderCheck() {
       </div>`;
     card.innerHTML = html;
     container.appendChild(card);
+  }
+
+  // AI照合の全体結果(あれば)を先頭に差し込む
+  const meta = state.orderCheckAiMeta;
+  if (meta && open.length) {
+    const box = document.createElement("div");
+    box.className = "pair-card oc-ai-meta";
+    box.innerHTML =
+      `<div class="pair-meta"><strong>AI照合</strong> (${meta.model} / ${meta.at})</div>` +
+      (meta.overall ? `<div class="pair-meta section-note">${meta.overall}</div>` : "") +
+      (meta.extra && meta.extra.length
+        ? `<div class="pair-meta section-note">スクショにある記録外の注文: ${meta.extra.map((x) => `・${x}`).join("<br>")}</div>`
+        : "");
+    container.insertBefore(box, container.firstChild);
   }
 
   if (summary) {
@@ -757,21 +782,52 @@ const LS_ORDERSHOT = "rbsignal_ordershot_v1";
 function showOrderShot(dataUrl) {
   const img = document.getElementById("orderShotPreview");
   const clr = document.getElementById("orderShotClear");
+  const aiBtn = document.getElementById("ocAiBtn");
   if (!img) return;
+  state.orderShot = dataUrl || null;
   if (dataUrl) {
     img.src = dataUrl;
     img.classList.remove("hidden");
     clr.classList.remove("hidden");
+    if (aiBtn) aiBtn.classList.remove("hidden");
   } else {
     img.removeAttribute("src");
     img.classList.add("hidden");
     clr.classList.add("hidden");
+    if (aiBtn) aiBtn.classList.add("hidden");
   }
+}
+
+// 画像を長辺 maxEdge px 以下に縮小して data URL を返す(送信コスト・容量を抑える)。
+// 縮小不要ならそのまま返す。media_type は縮小時は image/jpeg、非縮小時は元のまま。
+function downscaleImage(dataUrl, maxEdge) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const long = Math.max(img.naturalWidth, img.naturalHeight);
+      if (long <= maxEdge) {
+        const m = /^data:(image\/[a-z+]+);base64,/.exec(dataUrl);
+        resolve({ dataUrl, mediaType: m ? m[1] : "image/png" });
+        return;
+      }
+      const scale = maxEdge / long;
+      const cw = Math.round(img.naturalWidth * scale);
+      const ch = Math.round(img.naturalHeight * scale);
+      const cv = document.createElement("canvas");
+      cv.width = cw;
+      cv.height = ch;
+      cv.getContext("2d").drawImage(img, 0, 0, cw, ch);
+      resolve({ dataUrl: cv.toDataURL("image/jpeg", 0.85), mediaType: "image/jpeg" });
+    };
+    img.onerror = () => resolve({ dataUrl, mediaType: "image/png" });
+    img.src = dataUrl;
+  });
 }
 
 function initOrderShotUI() {
   const input = document.getElementById("orderShotInput");
   const clr = document.getElementById("orderShotClear");
+  const aiBtn = document.getElementById("ocAiBtn");
   if (!input) return;
   try {
     const saved = sessionStorage.getItem(LS_ORDERSHOT);
@@ -781,10 +837,10 @@ function initOrderShotUI() {
     const file = input.files && input.files[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => {
-      const url = reader.result;
-      showOrderShot(url);
-      try { sessionStorage.setItem(LS_ORDERSHOT, url); } catch (e) {}
+    reader.onload = async () => {
+      const { dataUrl } = await downscaleImage(reader.result, 1568);
+      showOrderShot(dataUrl);
+      try { sessionStorage.setItem(LS_ORDERSHOT, dataUrl); } catch (e) {}
     };
     reader.readAsDataURL(file);
     input.value = "";
@@ -793,6 +849,179 @@ function initOrderShotUI() {
     showOrderShot(null);
     try { sessionStorage.removeItem(LS_ORDERSHOT); } catch (e) {}
   });
+  if (aiBtn) aiBtn.addEventListener("click", runAiOrderCheck);
+}
+
+// ===== AIによる自動照合(Anthropic Messages API を端末ブラウザから直接呼ぶ) =====
+async function runAiOrderCheck() {
+  const statusEl = document.getElementById("ocAiStatus");
+  const btn = document.getElementById("ocAiBtn");
+  const key = (state.settings.anthropicKey || "").trim();
+  if (!key) {
+    statusEl.textContent = "設定でAnthropic APIキーを入力してください。";
+    statusEl.classList.add("error");
+    return;
+  }
+  if (!state.orderShot) {
+    statusEl.textContent = "先にブローカーの注文一覧スクショを貼ってください。";
+    statusEl.classList.add("error");
+    return;
+  }
+  const open = state.positions.filter((p) => p.tranches.some((t) => !t.closed));
+  if (!open.length) {
+    statusEl.textContent = "照合対象の記録済みポジションがありません。";
+    statusEl.classList.add("error");
+    return;
+  }
+
+  // 期待される注文を、AIに渡す構造化データにする。
+  const expected = open.map((pos) => ({
+    posId: pos.id,
+    pair: pos.pairLabel,
+    side: pos.direction,
+    timeframe: pos.timeframe,
+    items: orderCheckItems(pos)
+      .filter((it) => it.checkable)
+      .map((it) => ({ key: `${pos.id}::${it.key}`, label: it.label })),
+  }));
+
+  const m = /^data:(image\/[a-z+]+);base64,(.+)$/s.exec(state.orderShot);
+  if (!m) {
+    statusEl.textContent = "画像の形式を認識できませんでした。別のスクショで試してください。";
+    statusEl.classList.add("error");
+    return;
+  }
+  const mediaType = m[1];
+  const b64 = m[2];
+
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["items", "extra_orders", "overall"],
+    properties: {
+      items: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["key", "verdict", "detail"],
+          properties: {
+            key: { type: "string" },
+            verdict: { type: "string", enum: ["match", "mismatch", "not_found", "unclear"] },
+            detail: { type: "string", description: "短い日本語の根拠(スクショのどの行と対応するか等)" },
+          },
+        },
+      },
+      extra_orders: {
+        type: "array",
+        items: { type: "string", description: "スクショにあるが期待リストに対応しない注文の要約(日本語)" },
+      },
+      overall: { type: "string", description: "全体の一言サマリー(日本語)" },
+    },
+  };
+
+  const system =
+    "あなたはシステムトレードの発注チェック補助です。ユーザーがFXブローカーのスマホアプリの" +
+    "「注文一覧/建玉一覧」のスクリーンショット(日本語、GMOクリック証券など)を提示します。" +
+    "別途渡す『期待される注文リスト』(各項目にkeyとlabel)と、スクショに写っている実際の注文/建玉を照合してください。" +
+    "照合の指針: (1)通貨ペア表記の揺れ(GBP/JPY, GBPJPY, ポンド円 等)は同一視。" +
+    "(2)方向: 買い/ロング/BUY = long、売り/ショート/SELL = short。" +
+    "(3)数量: 「枚」は1枚=1万通貨。「Lot/ロット/数量」列の単位はアプリにより1枚だったり1万通貨だったりするので、" +
+    "labelの枚数と桁が概ね一致すれば一致とみなす(端数±1枚は許容)。" +
+    "(4)価格: 指値/逆指値の価格はlabelの目標価格と数pips以内なら一致。成行/約定済み建玉はエントリー概算価格と近ければ一致。" +
+    "(5)スクショから確実に読み取れない場合は unclear。対応する注文がスクショに無ければ not_found。" +
+    "値は違うが対応行がある場合は mismatch。" +
+    "必ず、渡された全項目のkeyについて1件ずつ判定を返してください。" +
+    "スクショにあるが期待リストのどれにも対応しない注文は extra_orders に日本語で要約してください。";
+
+  btn.disabled = true;
+  statusEl.classList.remove("error");
+  statusEl.textContent = "AIが照合中…(数秒〜十数秒)";
+
+  const model = state.settings.visionModel || "claude-opus-5";
+  const outputConfig = { format: { type: "json_schema", schema } };
+  // effort は Opus/Sonnet 系のみ対応(Haiku 4.5 では 400 になる)。
+  if (model.indexOf("haiku") === -1) outputConfig.effort = "low";
+
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 4096,
+        output_config: outputConfig,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: mediaType, data: b64 } },
+              {
+                type: "text",
+                text:
+                  "期待される注文リスト(JSON):\n" +
+                  JSON.stringify(expected, null, 1) +
+                  "\n\n上のスクリーンショットと照合し、指定スキーマのJSONで返してください。",
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    if (!res.ok) {
+      let msg = `HTTP ${res.status}`;
+      try {
+        const j = await res.json();
+        if (j && j.error && j.error.message) msg = j.error.message;
+      } catch (e) {}
+      throw new Error(msg);
+    }
+    const data = await res.json();
+    const textBlock = (data.content || []).find((b) => b.type === "text");
+    if (!textBlock) throw new Error("AIの応答を解釈できませんでした");
+    const parsed = JSON.parse(textBlock.text);
+
+    // 判定を反映: match のみ自動チェック。判定は pos.orderCheckAi[itemKey] に保存して表示。
+    const byPos = {};
+    for (const it of parsed.items || []) {
+      const sep = it.key.indexOf("::");
+      if (sep < 0) continue;
+      const posId = it.key.slice(0, sep);
+      const itemKey = it.key.slice(sep + 2);
+      (byPos[posId] = byPos[posId] || {})[itemKey] = { verdict: it.verdict, detail: it.detail };
+    }
+    for (const pos of open) {
+      pos.orderCheckAi = byPos[pos.id] || {};
+      if (!pos.orderCheck) pos.orderCheck = {};
+      for (const [k, v] of Object.entries(pos.orderCheckAi)) {
+        if (v.verdict === "match") pos.orderCheck[k] = true;
+      }
+    }
+    state.orderCheckAiMeta = {
+      overall: parsed.overall || "",
+      extra: parsed.extra_orders || [],
+      at: new Date().toLocaleString("ja-JP"),
+      model: state.settings.visionModel,
+    };
+    savePositions(state.positions);
+    renderOrderCheck();
+    const u = data.usage || {};
+    statusEl.classList.remove("error");
+    statusEl.textContent =
+      `照合完了(${state.orderCheckAiMeta.at})。` +
+      (u.input_tokens ? ` 入力${u.input_tokens}/出力${u.output_tokens || 0}トークン。` : "") +
+      " match は自動チェック済み。mismatch / ? は手動で確認してください。";
+  } catch (e) {
+    statusEl.classList.add("error");
+    statusEl.textContent = `AI照合に失敗: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ========== エントリー記録モーダル ==========
@@ -975,6 +1204,8 @@ function syncUsdJpyField() {
 function initSettingsUI() {
   const s = state.settings;
   document.getElementById("apiKey").value = s.apiKey;
+  document.getElementById("anthropicKey").value = s.anthropicKey || "";
+  document.getElementById("visionModel").value = s.visionModel || "claude-opus-5";
   document.getElementById("capitalJpy").value = s.capitalJpy;
   document.getElementById("ddPct").value = s.ddPct;
   document.getElementById("usdJpy").value = s.usdJpyCached || s.usdJpy;
@@ -1002,6 +1233,8 @@ function initSettingsUI() {
   document.getElementById("saveSettings").addEventListener("click", () => {
     state.settings = {
       apiKey: document.getElementById("apiKey").value.trim(),
+      anthropicKey: document.getElementById("anthropicKey").value.trim(),
+      visionModel: document.getElementById("visionModel").value,
       capitalJpy: parseFloat(document.getElementById("capitalJpy").value) || 0,
       ddPct: parseFloat(document.getElementById("ddPct").value) || 0,
       usdJpy: parseFloat(document.getElementById("usdJpy").value) || 150,
