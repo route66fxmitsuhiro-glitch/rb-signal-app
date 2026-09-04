@@ -78,25 +78,14 @@
         <span id="settingsSaved" class="saved-flag hidden">保存しました</span>
 
         <div class="field" style="margin-top:16px;">
-          <span>通知(実験的)</span>
+          <span>通知</span>
         </div>
         <p class="field-note">
-          新規シグナルが出た日の朝、日足の境界(米国東部時間17:00、サマータイムで
-          自動的にJST6:00頃・冬時間はJST7:00頃にずれます)の15分前にスマホへ
-          プッシュ通知を送ります。発注は行わず、通知のみです。
+          新規シグナルが出た日の朝(米国東部時間17:00の取引日境界の前後)に、
+          <strong>Cloudflare Worker が判定して Discord に通知</strong>します。
+          セットアップ手順はリポジトリの <code>notify_worker/README.md</code> を参照。
+          このアプリ画面からは設定しません(発注も行いません)。
         </p>
-        <button id="enablePushBtn" class="btn btn-secondary" type="button">通知を有効にする</button>
-        <p id="pushStatus" class="field-note fetch-status"></p>
-        <div id="pushSubscriptionBox" class="hidden">
-          <p class="field-note">
-            初回のみ: 以下をコピーし、GitHubリポジトリの
-            Settings → Secrets and variables → Actions で
-            <code>PUSH_SUBSCRIPTION</code> という名前のRepository secretとして
-            保存してください。
-          </p>
-          <textarea id="pushSubscriptionOutput" readonly rows="4" style="width:100%;font-size:11px;"></textarea>
-          <button id="copyPushSubscriptionBtn" class="btn btn-ghost btn-small" type="button">コピー</button>
-        </div>
       </div>
     </section>
 

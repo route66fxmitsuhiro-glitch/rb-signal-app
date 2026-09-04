@@ -1252,75 +1252,8 @@ function initSettingsUI() {
   });
 }
 
-// ========== プッシュ通知(Web Push) ==========
-// GitHub Actions(notify/check-signals.js)が日足境界15分前(米国東部時間
-// 17:00基準、サマータイム連動)にこの購読先へ通知を送る。購読情報自体は
-// このアプリからGitHubへ自動送信する手段がない(バックエンドを持たない
-// 静的サイトのため)ので、生成したJSONをユーザーが手動でGitHub Secretsに
-// コピー&ペーストする一回限りのセットアップにしている。
-const VAPID_PUBLIC_KEY =
-  "BFeK5xi_QUu1WH3ug8D307qa6SoPHYux3LiQpoGdk2AjwZnLBQ6K5hyjjQUn7GPrrSVVynJbEsQQmq93XxpWR6I";
-
-function urlBase64ToUint8Array(base64String) {
-  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
-  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
-  const rawData = atob(base64);
-  const outputArray = new Uint8Array(rawData.length);
-  for (let i = 0; i < rawData.length; i++) outputArray[i] = rawData.charCodeAt(i);
-  return outputArray;
-}
-
-async function enablePushNotifications() {
-  const statusEl = document.getElementById("pushStatus");
-  statusEl.classList.remove("error");
-  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
-    statusEl.textContent = "この端末/ブラウザはプッシュ通知に対応していません(iPhoneはホーム画面に追加したPWAのみ対応、iOS16.4以降が必要)";
-    statusEl.classList.add("error");
-    return;
-  }
-  try {
-    const permission = await Notification.requestPermission();
-    if (permission !== "granted") {
-      statusEl.textContent = "通知が許可されませんでした(端末の設定からこのアプリの通知を許可してください)";
-      statusEl.classList.add("error");
-      return;
-    }
-    const registration = await navigator.serviceWorker.ready;
-    let subscription = await registration.pushManager.getSubscription();
-    if (!subscription) {
-      subscription = await registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
-      });
-    }
-    const json = JSON.stringify(subscription.toJSON());
-    const box = document.getElementById("pushSubscriptionBox");
-    const output = document.getElementById("pushSubscriptionOutput");
-    output.value = json;
-    box.classList.remove("hidden");
-    statusEl.textContent = "登録できました。下のテキストをコピーしてGitHub Secretsに保存してください。";
-  } catch (e) {
-    statusEl.textContent = `通知の登録に失敗しました: ${e.message}`;
-    statusEl.classList.add("error");
-  }
-}
-
-async function copyPushSubscription() {
-  const textarea = document.getElementById("pushSubscriptionOutput");
-  textarea.focus();
-  textarea.select();
-  try {
-    await navigator.clipboard.writeText(textarea.value);
-    const btn = document.getElementById("copyPushSubscriptionBtn");
-    const orig = btn.textContent;
-    btn.textContent = "コピーしました";
-    setTimeout(() => {
-      btn.textContent = orig;
-    }, 1500);
-  } catch (e) {
-    // クリップボードAPIが使えない端末では選択状態のまま手動コピーしてもらう
-  }
-}
+// 通知は Cloudflare Worker(notify_worker/)が判定し Discord Webhook へ送る。
+// アプリ側は通知に関与しない(旧 Web Push 実装は 2026-09-04 に撤去)。
 
 function init() {
   applyTheme();
@@ -1330,8 +1263,6 @@ function init() {
   document.getElementById("addPositionBtn").addEventListener("click", manualAddPosition);
   document.getElementById("entryModalCancel").addEventListener("click", closeEntryModal);
   document.getElementById("entryModalConfirm").addEventListener("click", confirmEntry);
-  document.getElementById("enablePushBtn").addEventListener("click", enablePushNotifications);
-  document.getElementById("copyPushSubscriptionBtn").addEventListener("click", copyPushSubscription);
   initOrderShotUI();
   renderPositions(null);
 

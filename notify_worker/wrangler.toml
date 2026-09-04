@@ -1,0 +1,22 @@
+# wrangler CLI でデプロイする人向け。ダッシュボードに worker.js を貼る場合は不要
+# (README.md の「A. ダッシュボードで貼る」を参照)。
+#
+#   npm i -g wrangler
+#   wrangler kv namespace create RB_KV        # 出力された id を下の id= に貼る
+#   wrangler secret put TWELVE_DATA_API_KEY
+#   wrangler secret put DISCORD_WEBHOOK_URL
+#   wrangler deploy
+
+name = "rb-signal-notify"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+kv_namespaces = [
+  { binding = "RB_KV", id = "REPLACE_WITH_KV_NAMESPACE_ID" }
+]
+
+# NY 17:00 境界の少し前を狙う。EDT: 境界=UTC21:00 / EST: 境界=UTC22:00。
+# worker 側が「直近境界の -30分〜+8時間」で判定 + KV で重複防止するので、
+# 多少ずれても・複数発火しても通知は取引日ごとに1回だけ。
+[triggers]
+crons = ["45 20 * * *", "45 21 * * *", "30 23 * * *"]
