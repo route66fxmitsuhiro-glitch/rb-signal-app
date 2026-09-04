@@ -173,11 +173,20 @@ async function runCheck(env, opts) {
             ` [ATR14=${fmtPrice(uo.atr14, "USD/JPY")} avgER=${uo.avgER.toFixed(3)}>${uo.erThreshold}` +
             ` 逆指値≈${uo.stopMult}R 保有${uo.holdDays}営業日]`
         );
-      } else if (uo && uo.rawDirection && uo.gateReady && !uo.gateOpen) {
-        log.push(`USDJPY アウトサイドデイは avgER=${uo.avgER.toFixed(3)} ≤ ${uo.erThreshold} でゲート閉`);
+      }
+      // シグナルの有無にかかわらず判定根拠を log に残す(このコードが走ったことの確認にもなる)
+      if (uo && uo.insufficientData) {
+        log.push("USDOutside: 日足不足で判定不可");
+      } else if (uo) {
+        const aer = uo.avgER != null ? uo.avgER.toFixed(3) : "n/a";
+        log.push(
+          `USDOutside: 前日=${uo.prevBar ? uo.prevBar.date : "?"} ` +
+            `outside=${uo.outside} dir=${uo.rawDirection} ` +
+            `avgER=${aer}(閾値${uo.erThreshold}) → ${uo.direction ? "発火 " + uo.direction : "発火なし"}`
+        );
       }
     } catch (e) {
-      log.push(`USDJPY outside error: ${e.message}`);
+      log.push(`USDOutside error: ${e.message}`);
     }
   }
 
