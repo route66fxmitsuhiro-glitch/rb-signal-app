@@ -3,3 +3,4 @@ vapid_private*.pem
 vapid_private*.txt
 *.env
 node_modules/
+GBPJPY_日足_TwelveData_1ヶ月.xlsx
