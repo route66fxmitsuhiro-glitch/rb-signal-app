@@ -29,7 +29,27 @@
     { symbol: "USD/JPY", label: "USDJPY" },
   ];
 
-  const API_OUTPUT_SIZE = 40; // ATR14+週足集計に十分な日数
+  // 分散レイヤー: USDJPYアウトサイドデイ継続(EAの RunUSDOutsideSignal 相当)。
+  // 前日の高安が前々日の高安を両方とも更新(アウトサイドデイ)し、かつ前日が
+  // 明確な陽線/陰線、さらに3ペア平均の効率比(ER)が閾値超(トレンド状態)の
+  // ときだけ、前日終値方向へ「今日の始値」で順張り。利食い目標なし、固定逆指値
+  // (約定 ∓ StopMult×ATR14、トレールしない)、HoldDays 営業日で時間切れ手仕舞い。
+  // パラメータは RB12tuned_WDLite.cpp の RegOption 既定値と一致させている
+  // (ロット再配分後の確定値 USDOutsideLotSize=0.08 を含む)。
+  const USD_OUTSIDE = {
+    symbol: "USD/JPY",
+    label: "USDJPY",
+    erWindow: 20, // EJFadeERWindow(ERゲートは3ペア共通で20)
+    erThreshold: 0.16, // USDOutsideERThreshold(avgER > これ で新規許可 = 高ERゲート)
+    stopMult: 2.25, // USDOutsideStopMult
+    holdDays: 5, // USDOutsideHoldDays(この営業日数で時間切れ手仕舞い)
+    lot: 0.08, // USDOutsideLotSize(ロット再配分後の確定値、基準ロット0.10と同じ土俵)
+  };
+
+  // ATR14(15本)・週足集計に加え、20本ERゲート(確定日足21本必要)にも
+  // 余裕を持たせるため多めに取得する。無料枠は outputsize 40 でも 60 でも
+  // 1リクエストで変わらない。週足側は末尾2週しか使わないため増やしても無害。
+  const API_OUTPUT_SIZE = 60;
 
   // ========== 日付・週の補助関数 ==========
 
@@ -67,6 +87,20 @@
   // 日付文字列(YYYY-MM-DD)の曜日(UTC正午基準、weekKeyOfと同じ解釈)。0=日,6=土。
   function dowOf(dateStr) {
     return new Date(dateStr + "T12:00:00Z").getUTCDay();
+  }
+
+  // dateStr から平日を n 日進めた日付(YYYY-MM-DD)。土日はスキップ、祝日は
+  // 考慮しない目安。EAは新しい日足バー確定ごとに保有日数を+1し、HoldDays に
+  // 達した最初のティックで手仕舞うため、n=HoldDays でその手仕舞い日に相当する。
+  function addTradingDays(dateStr, n) {
+    const d = new Date(dateStr + "T00:00:00Z");
+    let added = 0;
+    while (added < n) {
+      d.setUTCDate(d.getUTCDate() + 1);
+      const wd = d.getUTCDay();
+      if (wd !== 0 && wd !== 6) added++;
+    }
+    return ymd(d);
   }
 
   // 2本のバー(aが時系列で先、bが後)を1本にマージする。dateLabelは呼び出し側が
@@ -200,6 +234,88 @@
     };
   }
 
+  // ========== 分散レイヤー: USDJPYアウトサイドデイ継続 ==========
+
+  // Kaufman効率比(EAの ComputeER(window) と同じ)。bars は昇順、末尾が最新の
+  // 確定バー(EAの Close(1) 相当)。window+1 本前の終値との正味変化 ÷ 直近
+  // window 本の1日ごとの終値変化の絶対値合計。確定バーが window+1 本に満たなければ null。
+  function computeER(bars, window) {
+    if (!bars || bars.length < window + 1) return null;
+    const n = bars.length;
+    const netMove = Math.abs(bars[n - 1].close - bars[n - 1 - window].close);
+    let pathLen = 0;
+    for (let k = 1; k <= window; k++) {
+      pathLen += Math.abs(bars[n - k].close - bars[n - k - 1].close);
+    }
+    if (pathLen <= 0) return 0;
+    return netMove / pathLen;
+  }
+
+  // 3ペア(GBPJPY/GBPUSD/USDJPY)の効率比の平均。EAは RunDailySignals 内で
+  // erValue[p] を更新し、ERゲート付きの各レイヤーが avgER=(3ペア平均) を閾値と
+  // 比較して新規の可否を決める。barsBySymbol は
+  //   { "GBP/JPY": [...], "GBP/USD": [...], "USD/JPY": [...] }。
+  function computeAvgER(barsBySymbol, window) {
+    const w = window || 20;
+    const perPair = {};
+    const ers = [];
+    for (const p of PAIRS) {
+      const er = computeER(barsBySymbol && barsBySymbol[p.symbol], w);
+      if (er == null) return { ready: false, avgER: null, perPair: {} };
+      perPair[p.label] = er;
+      ers.push(er);
+    }
+    return { ready: true, avgER: ers.reduce((a, b) => a + b, 0) / ers.length, perPair };
+  }
+
+  // USDJPYアウトサイドデイ継続シグナル(EAの RunUSDOutsideSignal と同じ判定)。
+  // シグナルの有無にかかわらず、判定根拠(前々日/前日の高安・ER・ゲート状態)を
+  // 必ず含めて返す。er は computeAvgER の戻り値(nullでも可)。
+  function computeUsdOutsideSignal(usdjpyBars, er) {
+    const cfg = USD_OUTSIDE;
+    if (!usdjpyBars || usdjpyBars.length < 16) {
+      return { layer: "usd-outside", symbol: cfg.symbol, label: cfg.label, direction: null, insufficientData: true };
+    }
+    const n = usdjpyBars.length;
+    const prev = usdjpyBars[n - 1];
+    const prevPrev = usdjpyBars[n - 2];
+    const outside = prev.high > prevPrev.high && prev.low < prevPrev.low;
+    const closeUp = prev.close > prev.open;
+    const closeDown = prev.close < prev.open;
+    // EAの継続方向: 陽線→ロング / 陰線→ショート / 同値(始値=終値)→シグナルなし
+    let rawDirection = null;
+    if (outside && closeUp && !closeDown) rawDirection = "long";
+    else if (outside && closeDown && !closeUp) rawDirection = "short";
+
+    const atr14 = computeATR14(usdjpyBars);
+    const gateReady = !!(er && er.ready);
+    const gateOpen = gateReady ? er.avgER > cfg.erThreshold : false;
+    const fired = !!rawDirection && gateOpen && atr14 != null && atr14 > 0;
+
+    return {
+      layer: "usd-outside",
+      symbol: cfg.symbol,
+      label: cfg.label,
+      direction: fired ? rawDirection : null,
+      rawDirection, // ゲート適用前の方向(診断表示用)
+      outside,
+      brokeHigh: prev.high > prevPrev.high,
+      brokeLow: prev.low < prevPrev.low,
+      prevBar: prev,
+      prevPrevBar: prevPrev,
+      referenceDate: prev.date,
+      atr14,
+      stopMult: cfg.stopMult,
+      holdDays: cfg.holdDays,
+      lot: cfg.lot,
+      erThreshold: cfg.erThreshold,
+      avgER: gateReady ? er.avgER : null,
+      perPairER: gateReady ? er.perPair : null,
+      gateReady,
+      gateOpen,
+    };
+  }
+
   // 【重要】実際のEA(RB12tuned.cpp)は「今日が月曜かどうか」ではなく、
   // 「直近の完成日足バー(=前営業日)が月曜だったかどうか」で新しい週の
   // 確定を検知している。実データでも週足ドンチャンのエントリーは3,890件
@@ -311,10 +427,12 @@
   return {
     PAIRS,
     API_OUTPUT_SIZE,
+    USD_OUTSIDE,
     ymd,
     weekKeyOf,
     todayStr,
     dowOf,
+    addTradingDays,
     mergeBars,
     mergeWeekendIntoWeekdays,
     isDegenerateBar,
@@ -322,6 +440,9 @@
     computeATR14,
     breakoutDirection,
     computeDailySignal,
+    computeER,
+    computeAvgER,
+    computeUsdOutsideSignal,
     lastCompleteBarIsMonday,
     aggregateWeekly,
     officialWeeks,
@@ -348,6 +469,8 @@ const {
   fetchDailyBars,
   computeATR14,
   computeDailySignal,
+  computeAvgER,
+  computeUsdOutsideSignal,
   lastCompleteBarIsMonday,
   aggregateWeekly,
   officialWeeks,
@@ -404,8 +527,7 @@ function fmtPrice(v, symbol) {
 }
 const dirLabel = (d) => (d === "long" ? "ロング" : "ショート");
 
-async function checkPair(pair, apiKey) {
-  const bars = await fetchDailyBars(pair.symbol, apiKey);
+function analysePair(pair, bars) {
   const atr14 = computeATR14(bars);
   const dailySignal = computeDailySignal(bars);
   const allWeeklyBars = aggregateWeekly(bars);
@@ -464,14 +586,41 @@ async function runCheck(env, opts) {
 
   const lines = [];
   let anyOk = false;
+
+  // ERゲート(3ペア平均)を先に評価できるよう、まず全ペアの日足を取得する。
+  const barsBySymbol = {};
   for (const pair of PAIRS) {
     try {
-      const r = await checkPair(pair, env.TWELVE_DATA_API_KEY);
+      barsBySymbol[pair.symbol] = await fetchDailyBars(pair.symbol, env.TWELVE_DATA_API_KEY);
       anyOk = true;
-      if (r.note) log.push(r.note);
-      lines.push(...r.lines);
     } catch (e) {
       log.push(`${pair.label} error: ${e.message}`);
+    }
+  }
+  for (const pair of PAIRS) {
+    const bars = barsBySymbol[pair.symbol];
+    if (!bars) continue;
+    const r = analysePair(pair, bars);
+    if (r.note) log.push(r.note);
+    lines.push(...r.lines);
+  }
+
+  // 分散レイヤー: USDJPYアウトサイドデイ継続(3ペア平均ER > 0.16 のときだけ)。
+  if (barsBySymbol["USD/JPY"]) {
+    try {
+      const erAll = computeAvgER(barsBySymbol, 20);
+      const uo = computeUsdOutsideSignal(barsBySymbol["USD/JPY"], erAll);
+      if (uo && uo.direction) {
+        lines.push(
+          `USDJPY アウトサイドデイ継続 ${dirLabel(uo.direction)}` +
+            ` [ATR14=${fmtPrice(uo.atr14, "USD/JPY")} avgER=${uo.avgER.toFixed(3)}>${uo.erThreshold}` +
+            ` 逆指値≈${uo.stopMult}R 保有${uo.holdDays}営業日]`
+        );
+      } else if (uo && uo.rawDirection && uo.gateReady && !uo.gateOpen) {
+        log.push(`USDJPY アウトサイドデイは avgER=${uo.avgER.toFixed(3)} ≤ ${uo.erThreshold} でゲート閉`);
+      }
+    } catch (e) {
+      log.push(`USDJPY outside error: ${e.message}`);
     }
   }
 

@@ -12,11 +12,15 @@
 // 関数・定数を取り出すだけにし、二重実装によるロジックのズレを防ぐ。
 const {
   PAIRS,
+  USD_OUTSIDE,
   weekKeyOf,
   todayStr,
+  addTradingDays,
   fetchDailyBars,
   computeATR14,
   computeDailySignal,
+  computeAvgER,
+  computeUsdOutsideSignal,
   lastCompleteBarIsMonday,
   aggregateWeekly,
   officialWeeks,
@@ -158,6 +162,38 @@ function buildPositionRecord(pairLabel, symbol, timeframe, direction, entryPrice
   };
 }
 
+// USDJPYアウトサイドデイ継続の建玉レコード。コアの5トランシェとは形が違う:
+// 単一ユニット・利食い目標なし・固定逆指値(トレールしない)・時間切れ手仕舞い。
+// 既存の renderPositions / orderCheckItems / close-toggle 配線をそのまま流用できる
+// よう、tranches は1要素(name:"unit")で表現しつつ kind で分岐する。
+function buildSatelliteRecord(sig, entryPrice, scale) {
+  const lot = roundLot(sig.lot * scale);
+  const R = sig.atr14;
+  const fixedStop =
+    sig.direction === "long"
+      ? entryPrice - sig.stopMult * R
+      : entryPrice + sig.stopMult * R;
+  const entryDate = todayStr();
+  return {
+    id: `${sig.symbol}-usdoutside-${Date.now()}`,
+    kind: "usd-outside",
+    pairLabel: sig.label,
+    symbol: sig.symbol,
+    timeframe: "daily",
+    direction: sig.direction,
+    entryDate,
+    entryPrice,
+    R,
+    stopMult: sig.stopMult,
+    holdDays: sig.holdDays,
+    fixedStop,
+    exitDate: addTradingDays(entryDate, sig.holdDays), // 時間切れ手仕舞い目安(平日カウント)
+    tranches: [{ name: "unit", targetR: null, hardStopR: null, lot, closed: false }],
+    exitOverride: null,
+    orderCheck: {},
+  };
+}
+
 function targetPrice(pos, tranche) {
   if (tranche.targetR == null) return null;
   const off = pos.R * tranche.targetR;
@@ -190,6 +226,10 @@ function weeklyBreakdown(weekBar, dailyBars, direction) {
 // 「反対ブレイクによる撤退ライン」を、そのポジションの時間軸に応じた最新の完成バーから計算し、
 // hardStopがあればより近い方(エントリーに近い方)を採用する。
 function currentExitLevel(pos, latestStopTrigger) {
+  // USDOutside は固定逆指値(約定 ∓ StopMult×ATR14)。トレールも反対ブレイクも使わない。
+  if (pos.kind === "usd-outside") {
+    return { price: pos.fixedStop, source: `固定逆指値(${pos.stopMult}R、トレールなし)` };
+  }
   if (!latestStopTrigger) return { price: null, source: "データ不足" };
   const rideTranche = pos.tranches.find((t) => t.hardStopR);
   if (!rideTranche || rideTranche.closed) {
@@ -206,7 +246,17 @@ function currentExitLevel(pos, latestStopTrigger) {
 
 // ========== レンダリング ==========
 
-const state = { settings: loadSettings(), positions: loadPositions(), lastFetch: null, lastResults: null, autoUsdJpy: null, orderShot: null, orderCheckAiMeta: null };
+const state = { settings: loadSettings(), positions: loadPositions(), lastFetch: null, lastResults: null, autoUsdJpy: null, avgER: null, orderShot: null, orderCheckAiMeta: null };
+
+// EAのUSDOutsideレイヤーは専用の建玉スロットを1つだけ持ち、そのスロットが
+// 埋まっている間は新規シグナルを一切評価しない(方向は問わない = 同時に持てる
+// のは1本だけ)。このアプリはEAの内部状態を持たないため、ユーザーが記録済みの
+// 未決済 usd-outside ポジションで代用判定する。
+function hasOpenSatellite(kind) {
+  return state.positions.some(
+    (p) => p.kind === kind && p.tranches.some((t) => !t.closed)
+  );
+}
 
 // EAの AnyOpen()/WDAnyOpen() 相当。同じペア・時間軸・方向のトランシェが
 // 1つでも未決済で残っている間、EAは新しいブレイクアウトが成立しても
@@ -257,6 +307,12 @@ function fmtMai(lot) {
   return (lot * MAI_PER_LOT).toFixed(1);
 }
 
+// 保有カード等に出す時間軸ラベル。分散レイヤーはレイヤー名を返す。
+function tfLabel(pos) {
+  if (pos.kind === "usd-outside") return "アウトサイドデイ継続";
+  return pos.timeframe === "daily" ? "日足" : "週足";
+}
+
 // 暦の上ではもう金曜まで終わっているがEAではまだ確定していない週がある
 // 場合(主に月曜〜火曜朝)、その週を使った場合の参考プレビューをHTMLで返す。
 // なければ空文字。
@@ -293,6 +349,78 @@ function renderWeeklyPreview(previewSignal, symbol) {
       → 前週(${previewSignal.prevWeek.weekKey}週) 高${fmtPrice(previewSignal.prevWeek.high, symbol)}/安${fmtPrice(previewSignal.prevWeek.low, symbol)}
     </div>
   `;
+}
+
+// USDJPYアウトサイドデイ継続レイヤーの表示ブロック。シグナルの有無にかかわらず
+// 判定根拠(アウトサイドデイ成否・ER・ゲート状態)を必ず出す。
+function renderUsdOutsideBlock(sig, symbol) {
+  let h = `<div class="pair-meta" style="margin-top:10px;">
+    <span class="badge none">分散レイヤー: アウトサイドデイ継続(USDJPY)</span></div>`;
+
+  if (sig.insufficientData) {
+    h += `<div class="pair-meta">データ不足(確定日足が足りません)</div>`;
+    return h;
+  }
+
+  const gateTxt = !sig.gateReady
+    ? "ER算出に必要な確定日足(21本)が不足"
+    : `avgER=${sig.avgER.toFixed(3)}(閾値 ${sig.erThreshold} ${sig.gateOpen ? "超 → ゲート開" : "以下 → ゲート閉"})`;
+  h += `<div class="pair-meta">効率比ゲート(3ペア平均、高ERで有効): ${gateTxt}
+    ${sig.perPairER ? `<span class="section-note">[GBPJPY ${sig.perPairER.GBPJPY.toFixed(3)} / GBPUSD ${sig.perPairER.GBPUSD.toFixed(3)} / USDJPY ${sig.perPairER.USDJPY.toFixed(3)}]</span>` : ""}
+  </div>`;
+  h += `<div class="pair-meta">
+    判定根拠: 前々日 高${fmtPrice(sig.prevPrevBar.high, symbol)}/安${fmtPrice(sig.prevPrevBar.low, symbol)}
+    → 前日 高${fmtPrice(sig.prevBar.high, symbol)}/安${fmtPrice(sig.prevBar.low, symbol)}(${sig.prevBar.date}、
+    ${sig.prevBar.close > sig.prevBar.open ? "陽線" : sig.prevBar.close < sig.prevBar.open ? "陰線" : "同値"}) /
+    アウトサイドデイ: ${sig.outside ? "○(高安とも更新)" : `×(高値更新 ${sig.brokeHigh ? "○" : "×"} / 安値更新 ${sig.brokeLow ? "○" : "×"})`}
+  </div>`;
+
+  if (!sig.direction) {
+    let reason;
+    if (!sig.outside) reason = "前日がアウトサイドデイではない";
+    else if (!sig.rawDirection) reason = "前日の実体がない(始値=終値)";
+    else if (!sig.gateOpen) reason = sig.gateReady ? "効率比が閾値以下(もみ合い)でゲート閉" : "効率比を算出できない";
+    else reason = "ATR14を算出できない";
+    h += `<div class="pair-meta"><span class="badge none">本日シグナルなし</span> — ${reason}</div>`;
+    return h;
+  }
+
+  const scale = lotScaleFactor(state.settings);
+  const lot = roundLot(sig.lot * scale);
+  const stopPips = fmtPips(sig.atr14 * sig.stopMult, symbol);
+  const badge = sig.direction === "long" ? "long" : "short";
+  const alreadyOpen = hasOpenSatellite("usd-outside");
+  h += `
+    <div class="pair-meta">
+      <span class="badge ${badge}">継続 ${sig.direction === "long" ? "ロング" : "ショート"}</span>
+      ${sig.prevBar.close > sig.prevBar.open ? "前日陽線 → 順張り買い" : "前日陰線 → 順張り売り"}
+      ${alreadyOpen ? '<span class="badge warn">既に保有中(EAは1本しか持たない)</span>' : ""}
+      ATR14=${fmtPrice(sig.atr14, symbol)}(R)
+    </div>
+    <table class="tranche-table">
+      <thead><tr><th>枚数</th><th>利食い</th><th>逆指値(固定)</th><th>時間切れ</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>${fmtMai(lot)}枚</td>
+          <td>なし(目標なし)</td>
+          <td>約定 ${sig.direction === "long" ? "−" : "+"} ${stopPips}pips(${sig.stopMult}×ATR14、トレールなし)</td>
+          <td>${sig.holdDays}営業日で手仕舞い</td>
+        </tr>
+      </tbody>
+    </table>
+    ${
+      alreadyOpen
+        ? `<p class="section-note">USDOutside レイヤーの建玉を既に保有中です。EA(RB12tuned)はこのレイヤーの
+           建玉スロットを1つしか持たず、埋まっている間は方向を問わず新規を取りません。ここで記録しないでください。</p>`
+        : `<p class="section-note">今日の始値でエントリー後、実際の約定価格を記録してください
+           (固定逆指値と手仕舞い予定日が計算されます)。</p>
+           <button class="btn btn-primary btn-small record-entry" data-symbol="${sig.symbol}" data-label="${sig.label}"
+             data-timeframe="daily" data-direction="${sig.direction}" data-layer="usd-outside">
+             このシグナルを記録
+           </button>`
+    }
+  `;
+  return h;
 }
 
 function renderSignals(results) {
@@ -454,6 +582,11 @@ function renderSignals(results) {
       html += renderWeeklyPreview(r.weekly.previewSignal, r.symbol);
     }
 
+    // --- 分散レイヤー: USDJPYアウトサイドデイ継続(USD/JPYのカードにだけ表示) ---
+    if (r.usdOutside) {
+      html += renderUsdOutsideBlock(r.usdOutside, r.symbol);
+    }
+
     card.innerHTML = html;
     container.appendChild(card);
   }
@@ -461,6 +594,60 @@ function renderSignals(results) {
   container.querySelectorAll(".record-entry").forEach((btn) => {
     btn.addEventListener("click", () => openEntryModal(btn.dataset));
   });
+}
+
+// USDJPYアウトサイドデイ継続の保有カード。固定逆指値 + 時間切れ手仕舞い日を表示。
+// クラス名・data属性はコアのカードと揃えてあるので、renderPositions 末尾の
+// close-toggle / delete-position / edit-exit / clear-exit-override 配線をそのまま流用できる。
+function renderSatelliteCard(pos) {
+  const card = document.createElement("div");
+  card.className = "pair-card";
+  const badge = pos.direction === "long" ? "long" : "short";
+  const t = pos.tranches[0];
+  const auto = currentExitLevel(pos, null); // 固定逆指値(トレールしない)
+  const hasOverride = pos.exitOverride != null;
+  const exit = hasOverride ? { price: pos.exitOverride, source: "手動設定" } : auto;
+  const today = todayStr();
+  const dueToday = today >= pos.exitDate;
+  const overdue = today > pos.exitDate;
+
+  card.innerHTML = `
+    <div class="pair-head">
+      <span class="pair-name">${pos.pairLabel}</span>
+      <span class="badge ${badge}">アウトサイドデイ継続 ${pos.direction === "long" ? "ロング" : "ショート"}</span>
+      ${dueToday ? `<span class="badge warn">${overdue ? "手仕舞い予定日を経過" : "本日が手仕舞い予定日"}</span>` : ""}
+    </div>
+    <div class="pair-meta">エントリー ${pos.entryDate} @ ${fmtPrice(pos.entryPrice, pos.symbol)} / R(ATR14)=${fmtPrice(pos.R, pos.symbol)}</div>
+    <div class="pair-meta">
+      逆指値(固定): <strong>${fmtPrice(exit.price, pos.symbol)}</strong>(${exit.source})
+      <button class="btn btn-ghost btn-small edit-exit" data-pos="${pos.id}">編集</button>
+      ${hasOverride ? `<button class="btn btn-ghost btn-small clear-exit-override" data-pos="${pos.id}">自動に戻す</button>` : ""}
+    </div>
+    ${
+      hasOverride && auto.price != null
+        ? `<div class="pair-meta section-note">自動計算値(参考): ${fmtPrice(auto.price, pos.symbol)}(${auto.source})</div>`
+        : ""
+    }
+    <div class="pair-meta section-note">
+      時間切れ手仕舞い目安: <strong>${pos.exitDate}</strong>(エントリーから${pos.holdDays}営業日、祝日は未考慮)。
+      その日の寄り付きで成行手仕舞い。利食い指値は置きません。
+    </div>
+    <table class="tranche-table">
+      <thead><tr><th>枠</th><th>枚数</th><th>目標</th><th>済</th></tr></thead>
+      <tbody>
+        <tr class="${t.closed ? "closed" : ""}">
+          <td>unit</td>
+          <td>${fmtMai(t.lot)}枚</td>
+          <td>なし(時間切れ or 固定逆指値)</td>
+          <td><input type="checkbox" class="close-toggle" data-pos="${pos.id}" data-tranche="unit" ${t.closed ? "checked" : ""} /></td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="pair-actions">
+      <button class="btn btn-ghost btn-small delete-position" data-pos="${pos.id}">削除</button>
+    </div>
+  `;
+  return card;
 }
 
 function renderPositions(freshDataBySymbol) {
@@ -471,6 +658,11 @@ function renderPositions(freshDataBySymbol) {
   empty.classList.toggle("hidden", openPositions.length > 0);
 
   for (const pos of openPositions) {
+    // 分散レイヤー(USDOutside 等)は形が違うので専用カードで描画する。
+    if (pos.kind === "usd-outside") {
+      container.appendChild(renderSatelliteCard(pos));
+      continue;
+    }
     const fresh = freshDataBySymbol ? freshDataBySymbol[pos.symbol] : null;
     let stopTrigger = null;
     let weeklyBreak = null;
@@ -608,8 +800,39 @@ function renderPositions(freshDataBySymbol) {
 // 記録済みポジションごとに「ブローカーの注文一覧にこう出ているはず」を並べ、
 // ユーザーが目視で一致を確認してチェックを付ける(自動照合はしない、A案)。
 
+// USDOutside(単一ユニット)用の注文チェック項目。成行1本 + 固定逆指値 + 時間切れの注記。
+function satelliteOrderCheckItems(pos) {
+  const exit =
+    pos.exitOverride != null
+      ? { price: pos.exitOverride, source: "手動設定" }
+      : { price: pos.fixedStop, source: `固定 ${pos.stopMult}R` };
+  const dir = pos.direction === "long" ? "ロング(買い)" : "ショート(売り)";
+  const t = pos.tranches[0];
+  return [
+    {
+      key: "entry",
+      checkable: true,
+      label: `USDJPY アウトサイドデイ継続: ${dir} を成行で 1 本 ${fmtMai(t.lot)}枚。約定 ≈ ${fmtPrice(pos.entryPrice, pos.symbol)}(スプレッド分ずれます)`,
+    },
+    {
+      key: "stop",
+      checkable: true,
+      label:
+        exit.price != null
+          ? `逆指値 @ ${fmtPrice(exit.price, pos.symbol)}(${exit.source}、トレールしない=置きっぱなしでOK)`
+          : "逆指値: データ不足",
+    },
+    {
+      key: "timeexit",
+      checkable: false,
+      label: `時間切れ手仕舞い目安: ${pos.exitDate}(エントリーから${pos.holdDays}営業日)。利食い指値は置かない。`,
+    },
+  ];
+}
+
 // 1ポジションのチェック項目リスト。{ key, label, checkable } の配列を返す。
 function orderCheckItems(pos) {
+  if (pos.kind === "usd-outside") return satelliteOrderCheckItems(pos);
   const exit = pos.exitOverride != null
     ? { price: pos.exitOverride, source: "手動設定" }
     : currentExitLevel(pos, latestStopTriggerFor(pos));
@@ -689,7 +912,7 @@ function renderOrderCheck() {
     let html = `
       <div class="pair-head">
         <span class="pair-name">${pos.pairLabel}</span>
-        <span class="badge ${badge}">${pos.timeframe === "daily" ? "日足" : "週足"} ${pos.direction === "long" ? "ロング" : "ショート"}</span>
+        <span class="badge ${badge}">${tfLabel(pos)} ${pos.direction === "long" ? "ロング" : "ショート"}</span>
         <span class="badge ${allOk ? "ok" : "warn"}">${allOk ? "一致確認済み" : `未確認 ${checkable.length - checked.length} 件`}</span>
       </div>
       <div class="pair-meta section-note">記録: ${pos.entryDate} @ ${fmtPrice(pos.entryPrice, pos.symbol)} / R=${fmtPrice(pos.R, pos.symbol)}</div>
@@ -1030,7 +1253,13 @@ let pendingEntry = null;
 
 function openEntryModal(ds) {
   pendingEntry = ds;
-  document.getElementById("entryModalTitle").textContent = `${ds.label} ${ds.timeframe === "daily" ? "日足" : "週足"} ${ds.direction === "long" ? "ロング" : "ショート"} — 約定価格を入力`;
+  const kindLabel =
+    ds.layer === "usd-outside"
+      ? "アウトサイドデイ継続"
+      : ds.timeframe === "daily"
+      ? "日足"
+      : "週足";
+  document.getElementById("entryModalTitle").textContent = `${ds.label} ${kindLabel} ${ds.direction === "long" ? "ロング" : "ショート"} — 約定価格を入力`;
   document.getElementById("entryPriceInput").value = "";
   document.getElementById("entryModal").classList.remove("hidden");
 }
@@ -1048,6 +1277,23 @@ function confirmEntry() {
     return;
   }
   const scale = lotScaleFactor(state.settings);
+
+  // 分散レイヤー: USDJPYアウトサイドデイ継続。コアとは建玉の形が違うので専用処理。
+  if (pendingEntry.layer === "usd-outside") {
+    const usd = state.lastResults && state.lastResults.find((r) => r.symbol === "USD/JPY");
+    const sig = usd && usd.usdOutside;
+    if (!sig || !sig.direction) {
+      alert("USDJPYアウトサイドデイのシグナル情報が見つかりません。『本日の判定を取得』をやり直してください。");
+      return;
+    }
+    state.positions.push(buildSatelliteRecord(sig, price, scale));
+    savePositions(state.positions);
+    closeEntryModal();
+    renderPositions(state.lastFetch);
+    alert("記録しました。固定逆指値と手仕舞い予定日は保有カードに表示されます。");
+    return;
+  }
+
   let R;
   if (pendingEntry.timeframe === "daily") {
     // 日足のRはATR14そのもの(約定価格に依存しない、EAのr=ComputeATR14()と同じ)
@@ -1151,6 +1397,15 @@ async function fetchAndRender() {
       }
       if (typeof syncUsdJpyField === "function") syncUsdJpyField();
     }
+    // 分散レイヤー: USDJPYアウトサイドデイ継続。3ペア平均ER(20本)を先に計算し、
+    // USD/JPY のシグナルを判定して結果に添付する(ゲートは3ペア共通のため全ペア取得後に評価)。
+    const barsBySymbol = {};
+    for (const p of PAIRS) barsBySymbol[p.symbol] = freshBySymbol[p.symbol].daily.bars;
+    const er = computeAvgER(barsBySymbol, 20);
+    state.avgER = er;
+    const usdResult = results.find((x) => x.symbol === "USD/JPY");
+    if (usdResult) usdResult.usdOutside = computeUsdOutsideSignal(barsBySymbol["USD/JPY"], er);
+
     state.lastFetch = freshBySymbol;
     state.lastResults = results;
     renderSignals(results);

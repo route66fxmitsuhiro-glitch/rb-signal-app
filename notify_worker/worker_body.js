@@ -16,6 +16,8 @@ const {
   fetchDailyBars,
   computeATR14,
   computeDailySignal,
+  computeAvgER,
+  computeUsdOutsideSignal,
   lastCompleteBarIsMonday,
   aggregateWeekly,
   officialWeeks,
@@ -72,8 +74,7 @@ function fmtPrice(v, symbol) {
 }
 const dirLabel = (d) => (d === "long" ? "ロング" : "ショート");
 
-async function checkPair(pair, apiKey) {
-  const bars = await fetchDailyBars(pair.symbol, apiKey);
+function analysePair(pair, bars) {
   const atr14 = computeATR14(bars);
   const dailySignal = computeDailySignal(bars);
   const allWeeklyBars = aggregateWeekly(bars);
@@ -132,14 +133,41 @@ async function runCheck(env, opts) {
 
   const lines = [];
   let anyOk = false;
+
+  // ERゲート(3ペア平均)を先に評価できるよう、まず全ペアの日足を取得する。
+  const barsBySymbol = {};
   for (const pair of PAIRS) {
     try {
-      const r = await checkPair(pair, env.TWELVE_DATA_API_KEY);
+      barsBySymbol[pair.symbol] = await fetchDailyBars(pair.symbol, env.TWELVE_DATA_API_KEY);
       anyOk = true;
-      if (r.note) log.push(r.note);
-      lines.push(...r.lines);
     } catch (e) {
       log.push(`${pair.label} error: ${e.message}`);
+    }
+  }
+  for (const pair of PAIRS) {
+    const bars = barsBySymbol[pair.symbol];
+    if (!bars) continue;
+    const r = analysePair(pair, bars);
+    if (r.note) log.push(r.note);
+    lines.push(...r.lines);
+  }
+
+  // 分散レイヤー: USDJPYアウトサイドデイ継続(3ペア平均ER > 0.16 のときだけ)。
+  if (barsBySymbol["USD/JPY"]) {
+    try {
+      const erAll = computeAvgER(barsBySymbol, 20);
+      const uo = computeUsdOutsideSignal(barsBySymbol["USD/JPY"], erAll);
+      if (uo && uo.direction) {
+        lines.push(
+          `USDJPY アウトサイドデイ継続 ${dirLabel(uo.direction)}` +
+            ` [ATR14=${fmtPrice(uo.atr14, "USD/JPY")} avgER=${uo.avgER.toFixed(3)}>${uo.erThreshold}` +
+            ` 逆指値≈${uo.stopMult}R 保有${uo.holdDays}営業日]`
+        );
+      } else if (uo && uo.rawDirection && uo.gateReady && !uo.gateOpen) {
+        log.push(`USDJPY アウトサイドデイは avgER=${uo.avgER.toFixed(3)} ≤ ${uo.erThreshold} でゲート閉`);
+      }
+    } catch (e) {
+      log.push(`USDJPY outside error: ${e.message}`);
     }
   }
 
