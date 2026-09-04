@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v25"; // v25: 分散レイヤー第1弾 USDJPYアウトサイドデイ継続を追加
+const CACHE_NAME = "rb-signal-shell-v26"; // v26: USDOutsideレイヤーは日曜足を残した日足系列で判定(EAのD1に一致、紙トレード照合)
 const SHELL_FILES = [
   "./",
   "./index.html",

@@ -13,7 +13,8 @@
 const SC = globalThis.SignalCore;
 const {
   PAIRS,
-  fetchDailyBars,
+  fetchRawDailyValues,
+  processDailyBars,
   computeATR14,
   computeDailySignal,
   computeAvgER,
@@ -134,15 +135,23 @@ async function runCheck(env, opts) {
   const lines = [];
   let anyOk = false;
 
-  // ERゲート(3ペア平均)を先に評価できるよう、まず全ペアの日足を取得する。
-  const barsBySymbol = {};
+  // まず全ペアの生日足を取得(1シンボル1回)。コア用(日曜足破棄)と
+  // USDOutside用(日曜足あり=EAのD1系列に一致)の2系列を派生させる。
+  const rawBySymbol = {};
   for (const pair of PAIRS) {
     try {
-      barsBySymbol[pair.symbol] = await fetchDailyBars(pair.symbol, env.TWELVE_DATA_API_KEY);
+      rawBySymbol[pair.symbol] = await fetchRawDailyValues(pair.symbol, env.TWELVE_DATA_API_KEY);
       anyOk = true;
     } catch (e) {
       log.push(`${pair.label} error: ${e.message}`);
     }
+  }
+  const barsBySymbol = {};
+  const ksBySymbol = {};
+  for (const pair of PAIRS) {
+    if (!rawBySymbol[pair.symbol]) continue;
+    barsBySymbol[pair.symbol] = processDailyBars(rawBySymbol[pair.symbol], { keepSunday: false });
+    ksBySymbol[pair.symbol] = processDailyBars(rawBySymbol[pair.symbol], { keepSunday: true });
   }
   for (const pair of PAIRS) {
     const bars = barsBySymbol[pair.symbol];
@@ -153,10 +162,11 @@ async function runCheck(env, opts) {
   }
 
   // 分散レイヤー: USDJPYアウトサイドデイ継続(3ペア平均ER > 0.16 のときだけ)。
-  if (barsBySymbol["USD/JPY"]) {
+  // 日曜足を残した系列で判定(紙トレード照合 2026-09-04)。
+  if (ksBySymbol["USD/JPY"]) {
     try {
-      const erAll = computeAvgER(barsBySymbol, 20);
-      const uo = computeUsdOutsideSignal(barsBySymbol["USD/JPY"], erAll);
+      const erAll = computeAvgER(ksBySymbol, 20);
+      const uo = computeUsdOutsideSignal(ksBySymbol["USD/JPY"], erAll);
       if (uo && uo.direction) {
         lines.push(
           `USDJPY アウトサイドデイ継続 ${dirLabel(uo.direction)}` +

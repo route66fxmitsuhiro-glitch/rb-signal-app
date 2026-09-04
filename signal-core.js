@@ -114,8 +114,16 @@
   // FXはニューヨーク時間17時にクローズするため、日本時間では土曜早朝まで
   // 実際に値動きがある。「土曜日付のバー」を単純に除外すると金曜セッション
   // 終盤の値動きを切り捨ててしまうため、除外ではなく直前の金曜バーへマージ
-  // する。日曜日付のバー(薄商いで非現実的なヒゲが乗りやすい)は単純に破棄する。
-  function mergeWeekendIntoWeekdays(rawBars) {
+  // する。日曜日付のバー(週明けの立ち上がりの数時間)の扱いは keepSunday で
+  // 切り替える:
+  //   keepSunday=false(既定, コア用) … 破棄する。薄商いの非現実的なヒゲを
+  //     月曜/週足の高安・ATRに持ち込まないため(2026-08-18 の対応)。
+  //   keepSunday=true(USDOutsideレイヤー用) … 独立した1本として残す。EA(FT5)の
+  //     D1系列は日曜の立ち上がりバーを1本持っており、このレイヤーの
+  //     「アウトサイドデイ」判定は EA と同じバー構成でないと大きくズレる
+  //     (火曜エントリー = 月曜が日曜スタブ足を包んだ、という判定が主戦力の
+  //     ため。紙トレード照合 2026-09-04 で確認)。
+  function mergeWeekendIntoWeekdays(rawBars, keepSunday) {
     const sorted = [...rawBars].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
     const result = [];
     let i = 0;
@@ -129,9 +137,8 @@
           result[result.length - 1] = mergeBars(prev, cur, prev.date);
         }
         i++;
-      } else if (d === 0) {
-        // 日曜 → マージせず単純に破棄する(薄商いのヒゲを月曜に持ち込まない)。
-        i++;
+      } else if (d === 0 && !keepSunday) {
+        i++; // 日曜 → 破棄
       } else {
         result.push(cur);
         i++;
@@ -146,7 +153,10 @@
     return b.high === b.low;
   }
 
-  async function fetchDailyBars(symbol, apiKey) {
+  // Twelve Data の生レスポンスから rawBars 配列(カレンダー日、未整形)を取り出す。
+  // HTTP は 1シンボルにつき1回だけ。整形(週末処理・整列・当日足除外)は
+  // processDailyBars で行い、コア用/USDOutside用の2系列を1回の取得から作れるようにする。
+  async function fetchRawDailyValues(symbol, apiKey) {
     const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=1day&outputsize=${API_OUTPUT_SIZE}&apikey=${encodeURIComponent(apiKey)}`;
     let res;
     try {
@@ -159,21 +169,30 @@
     if (json.status === "error" || !Array.isArray(json.values)) {
       throw new Error(json.message || "APIがエラーを返しました(シンボル/APIキーを確認してください)");
     }
-    const rawBars = json.values.map((v) => ({
+    return json.values.map((v) => ({
       date: v.datetime.slice(0, 10),
       open: parseFloat(v.open),
       high: parseFloat(v.high),
       low: parseFloat(v.low),
       close: parseFloat(v.close),
     }));
-    const merged = mergeWeekendIntoWeekdays(rawBars);
+  }
+
+  // rawBars → 整形済み日足配列。opts.keepSunday で日曜足の扱いを切り替える。
+  function processDailyBars(rawBars, opts) {
+    const keepSunday = !!(opts && opts.keepSunday);
+    const merged = mergeWeekendIntoWeekdays(rawBars, keepSunday);
     const bars = merged.filter((b) => !isDegenerateBar(b));
     bars.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-
     // 本日分がまだ形成中の可能性があるバーは除外する(保守的な近似)。
     const today = todayStr();
     const complete = bars.filter((b) => b.date < today);
     return complete.length >= 2 ? complete : bars.slice(0, -1);
+  }
+
+  // 既存の呼び出し互換: コア用(日曜足を破棄した)整形済み日足を取得する。
+  async function fetchDailyBars(symbol, apiKey) {
+    return processDailyBars(await fetchRawDailyValues(symbol, apiKey), { keepSunday: false });
   }
 
   // ========== 計算ロジック ==========
@@ -432,6 +451,8 @@
     mergeBars,
     mergeWeekendIntoWeekdays,
     isDegenerateBar,
+    fetchRawDailyValues,
+    processDailyBars,
     fetchDailyBars,
     computeATR14,
     breakoutDirection,

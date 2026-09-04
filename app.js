@@ -16,7 +16,8 @@ const {
   weekKeyOf,
   todayStr,
   addTradingDays,
-  fetchDailyBars,
+  fetchRawDailyValues,
+  processDailyBars,
   computeATR14,
   computeDailySignal,
   computeAvgER,
@@ -1361,9 +1362,11 @@ async function fetchAndRender() {
 
   const results = [];
   const freshBySymbol = {};
+  const rawBySymbol = {}; // Twelve Data の生日足(1シンボル1取得)。コア用と USDOutside 用の2系列を派生させる。
   try {
     for (const p of PAIRS) {
-      const bars = await fetchDailyBars(p.symbol, s.apiKey);
+      rawBySymbol[p.symbol] = await fetchRawDailyValues(p.symbol, s.apiKey);
+      const bars = processDailyBars(rawBySymbol[p.symbol], { keepSunday: false }); // コア(日曜足を破棄)
       const atr14 = computeATR14(bars);
       const dailySignal = computeDailySignal(bars);
       const allWeeklyBars = aggregateWeekly(bars);
@@ -1397,14 +1400,15 @@ async function fetchAndRender() {
       }
       if (typeof syncUsdJpyField === "function") syncUsdJpyField();
     }
-    // 分散レイヤー: USDJPYアウトサイドデイ継続。3ペア平均ER(20本)を先に計算し、
-    // USD/JPY のシグナルを判定して結果に添付する(ゲートは3ペア共通のため全ペア取得後に評価)。
-    const barsBySymbol = {};
-    for (const p of PAIRS) barsBySymbol[p.symbol] = freshBySymbol[p.symbol].daily.bars;
-    const er = computeAvgER(barsBySymbol, 20);
+    // 分散レイヤー: USDJPYアウトサイドデイ継続。EA(FT5)の D1 系列に合わせて
+    // 「日曜足を残した」3ペア日足で avgER(20本)を計算し、USD/JPY のシグナルを
+    // 判定する(コアの日曜足破棄系列では EA と大きくズレる。紙トレード照合 2026-09-04)。
+    const ksBySymbol = {};
+    for (const p of PAIRS) ksBySymbol[p.symbol] = processDailyBars(rawBySymbol[p.symbol], { keepSunday: true });
+    const er = computeAvgER(ksBySymbol, 20);
     state.avgER = er;
     const usdResult = results.find((x) => x.symbol === "USD/JPY");
-    if (usdResult) usdResult.usdOutside = computeUsdOutsideSignal(barsBySymbol["USD/JPY"], er);
+    if (usdResult) usdResult.usdOutside = computeUsdOutsideSignal(ksBySymbol["USD/JPY"], er);
 
     state.lastFetch = freshBySymbol;
     state.lastResults = results;
