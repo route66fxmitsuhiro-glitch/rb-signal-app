@@ -549,14 +549,16 @@ function fmtPrice(v, symbol) {
 }
 const dirLabel = (d) => (d === "long" ? "ロング" : "ショート");
 
-function analysePair(pair, bars) {
+// bars: 日足RideThin用(日曜足あり=EAのD1系列に一致)。weeklySrcBars: 週足ドンチャン用
+// (日曜足なし、撤退ライン汚染対策 2026-08-18)。
+function analysePair(pair, bars, weeklySrcBars) {
   const atr14 = computeATR14(bars);
   const dailySignal = computeDailySignal(bars);
-  const allWeeklyBars = aggregateWeekly(bars);
+  const allWeeklyBars = aggregateWeekly(weeklySrcBars);
   const weeklyBars = officialWeeks(allWeeklyBars);
-  const latestDailyBar = bars.length ? bars[bars.length - 1] : null;
+  const latestDailyBar = weeklySrcBars.length ? weeklySrcBars[weeklySrcBars.length - 1] : null;
   const weeklySignal = computeWeeklySignal(weeklyBars, latestDailyBar);
-  const weeklyIsNewToday = lastCompleteBarIsMonday(bars);
+  const weeklyIsNewToday = lastCompleteBarIsMonday(weeklySrcBars);
 
   const lines = [];
   if (dailySignal && dailySignal.direction) {
@@ -609,8 +611,9 @@ async function runCheck(env, opts) {
   const lines = [];
   let anyOk = false;
 
-  // まず全ペアの生日足を取得(1シンボル1回)。コア用(日曜足破棄)と
-  // USDOutside用(日曜足あり=EAのD1系列に一致)の2系列を派生させる。
+  // まず全ペアの生日足を取得(1シンボル1回)。日足RideThin・ER用(日曜足あり=EAの
+  // D1系列に一致)と週足ドンチャン用(日曜足破棄、撤退ライン汚染対策 2026-08-18)の
+  // 2系列を派生させる(2026-09-05: 日足RideThinも紙トレード照合でSunday-keptに統一)。
   const rawBySymbol = {};
   for (const pair of PAIRS) {
     try {
@@ -620,27 +623,27 @@ async function runCheck(env, opts) {
       log.push(`${pair.label} error: ${e.message}`);
     }
   }
-  const barsBySymbol = {};
-  const ksBySymbol = {};
+  const barsBySymbol = {};       // 日足RideThin・ER(日曜足あり)
+  const weeklySrcBySymbol = {};  // 週足ドンチャン(日曜足なし)
   for (const pair of PAIRS) {
     if (!rawBySymbol[pair.symbol]) continue;
-    barsBySymbol[pair.symbol] = processDailyBars(rawBySymbol[pair.symbol], { keepSunday: false });
-    ksBySymbol[pair.symbol] = processDailyBars(rawBySymbol[pair.symbol], { keepSunday: true });
+    barsBySymbol[pair.symbol] = processDailyBars(rawBySymbol[pair.symbol], { keepSunday: true });
+    weeklySrcBySymbol[pair.symbol] = processDailyBars(rawBySymbol[pair.symbol], { keepSunday: false });
   }
   for (const pair of PAIRS) {
     const bars = barsBySymbol[pair.symbol];
     if (!bars) continue;
-    const r = analysePair(pair, bars);
+    const r = analysePair(pair, bars, weeklySrcBySymbol[pair.symbol]);
     if (r.note) log.push(r.note);
     lines.push(...r.lines);
   }
 
   // 分散レイヤー: USDJPYアウトサイドデイ継続(3ペア平均ER > 0.16 のときだけ)。
-  // 日曜足を残した系列で判定(紙トレード照合 2026-09-04)。
-  if (ksBySymbol["USD/JPY"]) {
+  // 日足RideThinと同じ日曜足ありの系列で判定。
+  if (barsBySymbol["USD/JPY"]) {
     try {
-      const erAll = computeAvgER(ksBySymbol, 20);
-      const uo = computeUsdOutsideSignal(ksBySymbol["USD/JPY"], erAll);
+      const erAll = computeAvgER(barsBySymbol, 20);
+      const uo = computeUsdOutsideSignal(barsBySymbol["USD/JPY"], erAll);
       if (uo && uo.direction) {
         lines.push(
           `USDJPY アウトサイドデイ継続 ${dirLabel(uo.direction)}` +

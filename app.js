@@ -507,7 +507,7 @@ function renderSignals(results) {
       const scale = lotScaleFactor(state.settings);
       const tranches = tranchesWithLots(WEEKLY_TRANCHES, BASE_LOT_WEEKLY, scale);
       const lastWeek = r.weekly.bars[r.weekly.bars.length - 1];
-      const isNewToday = lastCompleteBarIsMonday(r.daily.bars);
+      const isNewToday = lastCompleteBarIsMonday(r.weeklySourceBars); // 週足の判定日は日曜足なしの系列で(daily.barsは日曜足ありに変更済み)
       // 実際のR = 約定価格 - 前週安値(ロング) / 前週高値 - 約定価格(ショート)。
       // 約定価格はまだ分からないため、表示用にATR代わりのレンジ幅ではなく
       // 「前週高値/安値を仮の約定価格とみなした場合のR」を参考値として出す
@@ -568,7 +568,7 @@ function renderSignals(results) {
       `;
       html += renderWeeklyPreview(r.weekly.previewSignal, r.symbol);
     } else if (wsig) {
-      const isNewToday = lastCompleteBarIsMonday(r.daily.bars);
+      const isNewToday = lastCompleteBarIsMonday(r.weeklySourceBars); // 週足の判定日は日曜足なしの系列で(daily.barsは日曜足ありに変更済み)
       html += `
         <div class="pair-meta" style="margin-top:10px;">
           週足: <span class="badge none">シグナルなし</span>
@@ -676,7 +676,7 @@ function renderPositions(freshDataBySymbol) {
       } else if (fresh.weekly.bars.length) {
         const lastWeekBar = fresh.weekly.bars[fresh.weekly.bars.length - 1];
         stopTrigger = pos.direction === "long" ? lastWeekBar.low : lastWeekBar.high;
-        weeklyBreak = weeklyBreakdown(lastWeekBar, fresh.daily.bars, pos.direction);
+        weeklyBreak = weeklyBreakdown(lastWeekBar, fresh.weeklySourceBars, pos.direction);
       }
     }
     const autoExit = currentExitLevel(pos, stopTrigger);
@@ -1362,18 +1362,26 @@ async function fetchAndRender() {
 
   const results = [];
   const freshBySymbol = {};
-  const rawBySymbol = {}; // Twelve Data の生日足(1シンボル1取得)。コア用と USDOutside 用の2系列を派生させる。
+  const rawBySymbol = {}; // Twelve Data の生日足(1シンボル1取得)。ここから2系列を派生させる。
   try {
     for (const p of PAIRS) {
       rawBySymbol[p.symbol] = await fetchRawDailyValues(p.symbol, s.apiKey);
-      const bars = processDailyBars(rawBySymbol[p.symbol], { keepSunday: false }); // コア(日曜足を破棄)
+      // 【2026-09-05修正】日足RideThinはEAのD1系列(日曜の立ち上がり数時間も独立した
+      // 1本のバーとして持つ)に合わせて keepSunday:true で判定する。紙トレード照合で
+      // 日曜足を破棄すると N=1 ブレイクの前日/前々日比較が週境界で1コマずれ、EAの実際の
+      // エントリーとの一致率が66%まで落ちることが判明(修正後は99%超)。ATR14・ERゲート
+      // (USDOutside等)もこの系列を使う(EAも同じ日足系列から計算しているため)。
+      // 週足ドンチャンの集計・撤退ライン表示は従来通り日曜足を破棄した系列のまま
+      // (Twelve Dataの日曜早朝スパイクが週足撤退ラインを汚す問題への対策、2026-08-18)。
+      const bars = processDailyBars(rawBySymbol[p.symbol], { keepSunday: true });
+      const weeklySourceBars = processDailyBars(rawBySymbol[p.symbol], { keepSunday: false });
       const atr14 = computeATR14(bars);
       const dailySignal = computeDailySignal(bars);
-      const allWeeklyBars = aggregateWeekly(bars);
+      const allWeeklyBars = aggregateWeekly(weeklySourceBars);
       const weeklyBars = officialWeeks(allWeeklyBars);
       // 直近の完成日足バー(新規判定日=通常火曜なら「月曜の足」)を渡して
-      // entryGuard(EAの r>0 ガードの近似判定)を計算させる。
-      const latestDailyBar = bars.length ? bars[bars.length - 1] : null;
+      // entryGuard(EAの r>0 ガードの近似判定)を計算させる。週足と同じ系列(日曜足なし)を使う。
+      const latestDailyBar = weeklySourceBars.length ? weeklySourceBars[weeklySourceBars.length - 1] : null;
       const weeklySignal = computeWeeklySignal(weeklyBars, latestDailyBar);
       // 暦の上ではもう金曜まで終わっているがEAはまだ確定として扱っていない
       // 週がある場合(月曜〜火曜朝によくある)、参考プレビューも計算する。
@@ -1384,6 +1392,7 @@ async function fetchAndRender() {
         label: p.label,
         daily: { bars, atr14, signal: dailySignal },
         weekly: { bars: weeklyBars, signal: weeklySignal, previewSignal },
+        weeklySourceBars, // weeklyBreakdown(日別内訳の診断表示)用。週足H/Lの計算根拠と同じ系列。
       };
       results.push(r);
       freshBySymbol[p.symbol] = r;
@@ -1400,12 +1409,12 @@ async function fetchAndRender() {
       }
       if (typeof syncUsdJpyField === "function") syncUsdJpyField();
     }
-    // 分散レイヤー: USDJPYアウトサイドデイ継続。EA(FT5)の D1 系列に合わせて
-    // 「日曜足を残した」3ペア日足で avgER(20本)を計算し、USD/JPY のシグナルを
-    // 判定する(コアの日曜足破棄系列では EA と大きくズレる。紙トレード照合 2026-09-04)。
-    const ksBySymbol = {};
-    for (const p of PAIRS) ksBySymbol[p.symbol] = processDailyBars(rawBySymbol[p.symbol], { keepSunday: true });
-    const er = computeAvgER(ksBySymbol, 20);
+    // 分散レイヤー: USDJPYアウトサイドデイ継続。ERゲートはコアと同じ日足系列
+    // (日曜足を残した3ペア日足)から計算する(EAも RunDailySignals 内の同じ系列で
+    // erValue[p] を更新しているため)。
+    const barsForER = {};
+    for (const p of PAIRS) barsForER[p.symbol] = freshBySymbol[p.symbol].daily.bars;
+    const er = computeAvgER(barsForER, 20);
     state.avgER = er;
     const usdResult = results.find((x) => x.symbol === "USD/JPY");
     if (usdResult) usdResult.usdOutside = computeUsdOutsideSignal(ksBySymbol["USD/JPY"], er);
