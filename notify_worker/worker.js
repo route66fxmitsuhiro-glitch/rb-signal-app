@@ -199,6 +199,70 @@
     return processDailyBars(await fetchRawDailyValues(symbol, apiKey), { keepSunday: false });
   }
 
+  // ========== FT5データを優先し、古すぎる場合だけTwelve Dataへフォールバック ==========
+  // 2026-09-06: Twelve Data(サードパーティAPI)とFT5(EAの実機検証に使われてきた
+  // Standard Data Feed/Forexite)のOHLCが数〜十数pips食い違い、日足RideThinの
+  // N=1ブレイク判定が最大3割ほど狂いうることが判明したため、EAと同じデータへの
+  // 切り替えを目指す。PC側で ft5_export/export_daily.py を実行して生成した
+  // data/ft5_daily.json(GitHub Pagesでホスト)を最優先で読み、ユーザーがFT5の
+  // データ更新・エクスポートを怠って古くなっている場合だけ、黙って古いデータを
+  // 使わずTwelve Dataへ自動フォールバックする(どちらを使ったかは必ず表示する)。
+  const FT5_EXPORT_URL = "https://route66fxmitsuhiro-glitch.github.io/rb-signal-app/data/ft5_daily.json";
+  const FT5_MAX_STALE_TRADING_DAYS = 1; // 直近の確定日足からこれを超えて営業日が経っていたら古すぎると判断
+
+  // 土日を除いた営業日数で dateA(exclusive)から dateB(exclusive)までの日数を数える。
+  function tradingDaysBetween(dateA, dateB) {
+    let d = new Date(dateA + "T00:00:00Z");
+    const end = new Date(dateB + "T00:00:00Z");
+    let count = 0;
+    while (d < end) {
+      d.setUTCDate(d.getUTCDate() + 1);
+      const wd = d.getUTCDay();
+      if (wd !== 0 && wd !== 6) count++;
+    }
+    return count;
+  }
+
+  let ft5ExportCache; // モジュール内キャッシュ(undefined=未取得、null=取得失敗、object=成功)
+  async function fetchFT5Export() {
+    if (ft5ExportCache !== undefined) return ft5ExportCache;
+    try {
+      const res = await fetch(FT5_EXPORT_URL, { cache: "no-store" });
+      if (!res.ok) {
+        ft5ExportCache = null;
+      } else {
+        ft5ExportCache = await res.json();
+      }
+    } catch (e) {
+      ft5ExportCache = null;
+    }
+    return ft5ExportCache;
+  }
+
+  // FT5エクスポートを優先し、無い/古すぎる場合だけTwelve Dataを取得する。
+  // 戻り値: { raw, source, note }。raw は fetchRawDailyValues と同じ形式の配列。
+  async function fetchRawDailyValuesAuto(symbol, apiKey) {
+    const exp = await fetchFT5Export();
+    const arr = exp && exp.pairs && exp.pairs[symbol];
+    if (arr && arr.length) {
+      const lastDate = arr[arr.length - 1].date;
+      const today = todayStr();
+      const staleTradingDays = tradingDaysBetween(lastDate, today);
+      if (staleTradingDays <= FT5_MAX_STALE_TRADING_DAYS) {
+        return { raw: arr, source: "FT5", note: `FT5(実機データ、${lastDate}時点)` };
+      }
+      const raw = await fetchRawDailyValues(symbol, apiKey);
+      return {
+        raw,
+        source: "TwelveData",
+        note: `Twelve Data(FT5データが${lastDate}時点で${staleTradingDays}営業日古いため自動切替。` +
+          `PCでFT5データ更新→エクスポートを実行してください)`,
+      };
+    }
+    const raw = await fetchRawDailyValues(symbol, apiKey);
+    return { raw, source: "TwelveData", note: "Twelve Data(FT5エクスポートが見つかりません)" };
+  }
+
   // ========== 計算ロジック ==========
 
   // ATR14(単純平均、EAのComputeATR14()相当。Wilder平滑化ではない点に注意)
@@ -456,6 +520,7 @@
     mergeWeekendIntoWeekdays,
     isDegenerateBar,
     fetchRawDailyValues,
+    fetchRawDailyValuesAuto,
     processDailyBars,
     fetchDailyBars,
     computeATR14,
@@ -488,7 +553,7 @@ const SC = globalThis.SignalCore;
 const {
   PAIRS,
   dowOf,
-  fetchRawDailyValues,
+  fetchRawDailyValuesAuto,
   processDailyBars,
   computeATR14,
   computeDailySignal,
@@ -551,8 +616,9 @@ function fmtPrice(v, symbol) {
 const dirLabel = (d) => (d === "long" ? "ロング" : "ショート");
 
 // bars: 日足RideThin用(日曜足あり=EAのD1系列に一致)。weeklySrcBars: 週足ドンチャン用
-// (日曜足なし、撤退ライン汚染対策 2026-08-18)。
-function analysePair(pair, bars, weeklySrcBars) {
+// (日曜足なし、撤退ライン汚染対策 2026-08-18)。isFT5: barsがFT5由来か(true)、
+// Twelve Dataフォールバックか(false)。火曜の注記の確度を出し分けるために使う。
+function analysePair(pair, bars, weeklySrcBars, isFT5) {
   const atr14 = computeATR14(bars);
   const dailySignal = computeDailySignal(bars);
   const allWeeklyBars = aggregateWeekly(weeklySrcBars);
@@ -568,7 +634,12 @@ function analysePair(pair, bars, weeklySrcBars) {
     // 火曜=前々日が日曜足(全体寄与32%で最大・チャートでは再現できないため本判定を優先すべき)。
     let sunTag = "";
     if (dowOf(dailySignal.prevBar.date) === 0) sunTag = "(月曜・薄商いバー由来、見送り可)";
-    else if (dowOf(dailySignal.prevPrevBar.date) === 0) sunTag = "(火曜・薄商いバー由来、チャート未表示でも本判定を優先)";
+    else if (dowOf(dailySignal.prevPrevBar.date) === 0) {
+      // 2026-09-06: Twelve Data由来だとこの曜日の判定一致率が実測3〜6割(FT5なら高信頼)。
+      sunTag = isFT5
+        ? "(火曜・薄商いバー由来、FT5データのため信頼度高)"
+        : "(火曜・薄商いバー由来、⚠️Twelve Dataフォールバック中で信頼度低)";
+    }
     lines.push(
       `${pair.label} 日足${dirLabel(dailySignal.direction)}` +
         (dailySignal.outside ? "(アウトサイド)" : "") +
@@ -619,13 +690,19 @@ async function runCheck(env, opts) {
   const lines = [];
   let anyOk = false;
 
-  // まず全ペアの生日足を取得(1シンボル1回)。日足RideThin・ER用(日曜足あり=EAの
-  // D1系列に一致)と週足ドンチャン用(日曜足破棄、撤退ライン汚染対策 2026-08-18)の
-  // 2系列を派生させる(2026-09-05: 日足RideThinも紙トレード照合でSunday-keptに統一)。
+  // まず全ペアの生日足を取得(1シンボル1回)。FT5エクスポート(EAと同じ
+  // Standard Data Feed/Forexite)を優先し、古すぎる場合だけTwelve Dataへ自動
+  // フォールバックする(2026-09-06、fetchRawDailyValuesAuto参照)。日足RideThin・
+  // ER用(日曜足あり=EAのD1系列に一致)と週足ドンチャン用(日曜足破棄、撤退ライン
+  // 汚染対策 2026-08-18)の2系列を派生させる。
   const rawBySymbol = {};
+  const sourceBySymbol = {}; // "FT5" or "TwelveData"
   for (const pair of PAIRS) {
     try {
-      rawBySymbol[pair.symbol] = await fetchRawDailyValues(pair.symbol, env.TWELVE_DATA_API_KEY);
+      const fetched = await fetchRawDailyValuesAuto(pair.symbol, env.TWELVE_DATA_API_KEY);
+      rawBySymbol[pair.symbol] = fetched.raw;
+      sourceBySymbol[pair.symbol] = fetched.source;
+      log.push(`${pair.label} data: ${fetched.note}`);
       anyOk = true;
     } catch (e) {
       log.push(`${pair.label} error: ${e.message}`);
@@ -641,7 +718,7 @@ async function runCheck(env, opts) {
   for (const pair of PAIRS) {
     const bars = barsBySymbol[pair.symbol];
     if (!bars) continue;
-    const r = analysePair(pair, bars, weeklySrcBySymbol[pair.symbol]);
+    const r = analysePair(pair, bars, weeklySrcBySymbol[pair.symbol], sourceBySymbol[pair.symbol] === "FT5");
     if (r.note) log.push(r.note);
     lines.push(...r.lines);
   }

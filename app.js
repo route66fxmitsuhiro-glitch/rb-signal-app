@@ -17,7 +17,7 @@ const {
   todayStr,
   dowOf,
   addTradingDays,
-  fetchRawDailyValues,
+  fetchRawDailyValuesAuto,
   processDailyBars,
   computeATR14,
   computeDailySignal,
@@ -357,10 +357,14 @@ function renderWeeklyPreview(previewSignal, symbol) {
 // 表示されない)が使われている場合の注記。2026-09-05の紙トレード照合・1分足試算
 // (sim_sunday_bar_ablation.py)で判明した実績を踏まえた文言:
 //   月曜のエントリー: 全体pipsへの寄与3.8%・勝率43.4%(全曜日中最弱) → 見送っても影響小
-//   火曜のエントリー: 全体pipsへの寄与32%(最大)・勝率62.2% → 必ず拾うべき、ただし
-//     判定根拠(前々日)がチャートで確認できないためアプリの判定を信頼する必要がある
-function sundayNote(dsig) {
+//   火曜のエントリー: 全体pipsへの寄与32%(最大)・勝率62.2% → 必ず拾うべき
+// 2026-09-06追記: Twelve DataとFT5の日曜薄商いバーのOHLCが数〜十数pips食い違い、
+// このTwelve Data由来の火曜判定は実測でFT5と29〜60%しか一致しないと判明
+// (水木金は88〜90%で問題なし)。このためデータソースがFT5(EAと同一データ)か
+// Twelve Data(フォールバック中)かで、火曜の注記の確度を出し分ける。
+function sundayNote(dsig, dataSourceNote) {
   if (!dsig || !dsig.prevBar || !dsig.prevPrevBar) return "";
+  const isFT5 = !!(dataSourceNote && dataSourceNote.startsWith("FT5"));
   const prevIsSun = dowOf(dsig.prevBar.date) === 0;
   const prevPrevIsSun = dowOf(dsig.prevPrevBar.date) === 0;
   if (prevIsSun) {
@@ -370,10 +374,19 @@ function sundayNote(dsig) {
       この時間帯に対応できないなら見送っても大きな機会損失にはなりません。</p>`;
   }
   if (prevPrevIsSun) {
-    return `<p class="section-note">⚠️ 火曜のエントリー候補です。判定に使う「前々日」(${dsig.prevPrevBar.date})が
-      市場再開直後の薄商いバーのため、ご自身のブローカーのチャートで前日・前々日を見比べても再現できません。
-      チャートの見た目と食い違って見えても、このアプリの判定を採用してください
-      (過去統計でこの曜日のエントリーが全曜日中最大の寄与・良好な勝率を記録しています)。</p>`;
+    if (isFT5) {
+      return `<p class="section-note">⚠️ 火曜のエントリー候補です。判定に使う「前々日」(${dsig.prevPrevBar.date})が
+        市場再開直後の薄商いバーのため、ご自身のブローカーのチャートで前日・前々日を見比べても再現できません。
+        チャートの見た目と食い違って見えても、このアプリの判定を採用してください
+        (過去統計でこの曜日のエントリーが全曜日中最大の寄与・良好な勝率を記録しています。
+        データソースはFT5=EAの実機検証と同一データのため、この判定の信頼度は高いです)。</p>`;
+    }
+    return `<p class="section-note">🔴 火曜のエントリー候補です。ただし現在の判定は<strong>Twelve Data(フォールバック中)</strong>
+      によるもので、判定根拠(前々日=市場再開直後の薄商いバー)はTwelve DataとFT5(EAの実機データ)で
+      数〜十数pips食い違いやすく、この曜日の判定一致率は実測で約3〜6割にとどまります(水木金は問題ありません)。
+      火曜は全曜日中最大の寄与(約32%)がある反面、今この判定はいつもより不確実です。
+      可能ならFT5のデータを更新・エクスポートしてから確認するか、ブローカーの短い時間軸チャートで
+      市場再開直後の値動きをご自身の目で確認してください。</p>`;
   }
   return "";
 }
@@ -462,7 +475,10 @@ function renderSignals(results) {
     const card = document.createElement("div");
     card.className = "pair-card";
 
-    let html = `<div class="pair-head"><span class="pair-name">${r.label}</span></div>`;
+    const srcBadge = r.dataSourceNote
+      ? `<span class="badge ${r.dataSourceNote.startsWith("FT5") ? "ok" : "warn"}">${r.dataSourceNote}</span>`
+      : "";
+    let html = `<div class="pair-head"><span class="pair-name">${r.label}</span>${srcBadge}</div>`;
 
     // --- 日足 ---
     const dsig = r.daily.signal;
@@ -485,7 +501,7 @@ function renderSignals(results) {
           → 前日 高${fmtPrice(dsig.prevBar.high, r.symbol)}/安${fmtPrice(dsig.prevBar.low, r.symbol)}(${dsig.prevBar.date}、
           ${dsig.prevBar.close >= dsig.prevBar.open ? "陽線" : "陰線"})
         </div>
-        ${sundayNote(dsig)}
+        ${sundayNote(dsig, r.dataSourceNote)}
         <table class="tranche-table">
           <thead><tr><th>枠</th><th>枚数</th><th>目標(pips)</th><th>初期逆指値目安</th></tr></thead>
           <tbody>
@@ -522,7 +538,7 @@ function renderSignals(results) {
           → 前日 高${fmtPrice(dsig.prevBar.high, r.symbol)}/安${fmtPrice(dsig.prevBar.low, r.symbol)}(${dsig.prevBar.date}、
           高値更新: ${dsig.brokeHigh ? "○" : "×"} / 安値更新: ${dsig.brokeLow ? "○" : "×"})
         </div>
-        ${sundayNote(dsig)}
+        ${sundayNote(dsig, r.dataSourceNote)}
       `;
     }
 
@@ -1390,10 +1406,13 @@ async function fetchAndRender() {
 
   const results = [];
   const freshBySymbol = {};
-  const rawBySymbol = {}; // Twelve Data の生日足(1シンボル1取得)。ここから2系列を派生させる。
+  const rawBySymbol = {}; // 生日足(1シンボル1取得)。ここから2系列を派生させる。
+  const sourceNotes = []; // どのペアがFT5/Twelve Dataどちらから来たかの一覧(取得ステータス表示用)
   try {
     for (const p of PAIRS) {
-      rawBySymbol[p.symbol] = await fetchRawDailyValues(p.symbol, s.apiKey);
+      const fetched = await fetchRawDailyValuesAuto(p.symbol, s.apiKey);
+      rawBySymbol[p.symbol] = fetched.raw;
+      sourceNotes.push(`${p.label}: ${fetched.note}`);
       // 【2026-09-05修正】日足RideThinはEAのD1系列(日曜の立ち上がり数時間も独立した
       // 1本のバーとして持つ)に合わせて keepSunday:true で判定する。紙トレード照合で
       // 日曜足を破棄すると N=1 ブレイクの前日/前々日比較が週境界で1コマずれ、EAの実際の
@@ -1421,6 +1440,7 @@ async function fetchAndRender() {
         daily: { bars, atr14, signal: dailySignal },
         weekly: { bars: weeklyBars, signal: weeklySignal, previewSignal },
         weeklySourceBars, // weeklyBreakdown(日別内訳の診断表示)用。週足H/Lの計算根拠と同じ系列。
+        dataSourceNote: fetched.note, // FT5/Twelve Data どちらから取得したか(教訓、2026-09-06)
       };
       results.push(r);
       freshBySymbol[p.symbol] = r;
@@ -1445,13 +1465,13 @@ async function fetchAndRender() {
     const er = computeAvgER(barsForER, 20);
     state.avgER = er;
     const usdResult = results.find((x) => x.symbol === "USD/JPY");
-    if (usdResult) usdResult.usdOutside = computeUsdOutsideSignal(ksBySymbol["USD/JPY"], er);
+    if (usdResult) usdResult.usdOutside = computeUsdOutsideSignal(barsForER["USD/JPY"], er);
 
     state.lastFetch = freshBySymbol;
     state.lastResults = results;
     renderSignals(results);
     renderPositions(freshBySymbol);
-    statusEl.textContent = `取得完了(${new Date().toLocaleString("ja-JP")})`;
+    statusEl.textContent = `取得完了(${new Date().toLocaleString("ja-JP")}) — ${sourceNotes.join(" / ")}`;
   } catch (e) {
     statusEl.textContent = `エラー: ${e.message}`;
     statusEl.classList.add("error");

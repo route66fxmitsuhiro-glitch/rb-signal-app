@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v28"; // v28: 月・火曜エントリー(日曜薄商いバー由来)に注記を追加
+const CACHE_NAME = "rb-signal-shell-v29"; // v29: FT5データを最優先ソースに(Twelve Dataは古い場合の自動フォールバック)+起動時クラッシュのバグ修正
 const SHELL_FILES = [
   "./",
   "./index.html",

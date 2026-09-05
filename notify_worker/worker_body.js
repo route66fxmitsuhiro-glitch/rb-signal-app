@@ -14,7 +14,7 @@ const SC = globalThis.SignalCore;
 const {
   PAIRS,
   dowOf,
-  fetchRawDailyValues,
+  fetchRawDailyValuesAuto,
   processDailyBars,
   computeATR14,
   computeDailySignal,
@@ -77,8 +77,9 @@ function fmtPrice(v, symbol) {
 const dirLabel = (d) => (d === "long" ? "ロング" : "ショート");
 
 // bars: 日足RideThin用(日曜足あり=EAのD1系列に一致)。weeklySrcBars: 週足ドンチャン用
-// (日曜足なし、撤退ライン汚染対策 2026-08-18)。
-function analysePair(pair, bars, weeklySrcBars) {
+// (日曜足なし、撤退ライン汚染対策 2026-08-18)。isFT5: barsがFT5由来か(true)、
+// Twelve Dataフォールバックか(false)。火曜の注記の確度を出し分けるために使う。
+function analysePair(pair, bars, weeklySrcBars, isFT5) {
   const atr14 = computeATR14(bars);
   const dailySignal = computeDailySignal(bars);
   const allWeeklyBars = aggregateWeekly(weeklySrcBars);
@@ -94,7 +95,12 @@ function analysePair(pair, bars, weeklySrcBars) {
     // 火曜=前々日が日曜足(全体寄与32%で最大・チャートでは再現できないため本判定を優先すべき)。
     let sunTag = "";
     if (dowOf(dailySignal.prevBar.date) === 0) sunTag = "(月曜・薄商いバー由来、見送り可)";
-    else if (dowOf(dailySignal.prevPrevBar.date) === 0) sunTag = "(火曜・薄商いバー由来、チャート未表示でも本判定を優先)";
+    else if (dowOf(dailySignal.prevPrevBar.date) === 0) {
+      // 2026-09-06: Twelve Data由来だとこの曜日の判定一致率が実測3〜6割(FT5なら高信頼)。
+      sunTag = isFT5
+        ? "(火曜・薄商いバー由来、FT5データのため信頼度高)"
+        : "(火曜・薄商いバー由来、⚠️Twelve Dataフォールバック中で信頼度低)";
+    }
     lines.push(
       `${pair.label} 日足${dirLabel(dailySignal.direction)}` +
         (dailySignal.outside ? "(アウトサイド)" : "") +
@@ -145,13 +151,19 @@ async function runCheck(env, opts) {
   const lines = [];
   let anyOk = false;
 
-  // まず全ペアの生日足を取得(1シンボル1回)。日足RideThin・ER用(日曜足あり=EAの
-  // D1系列に一致)と週足ドンチャン用(日曜足破棄、撤退ライン汚染対策 2026-08-18)の
-  // 2系列を派生させる(2026-09-05: 日足RideThinも紙トレード照合でSunday-keptに統一)。
+  // まず全ペアの生日足を取得(1シンボル1回)。FT5エクスポート(EAと同じ
+  // Standard Data Feed/Forexite)を優先し、古すぎる場合だけTwelve Dataへ自動
+  // フォールバックする(2026-09-06、fetchRawDailyValuesAuto参照)。日足RideThin・
+  // ER用(日曜足あり=EAのD1系列に一致)と週足ドンチャン用(日曜足破棄、撤退ライン
+  // 汚染対策 2026-08-18)の2系列を派生させる。
   const rawBySymbol = {};
+  const sourceBySymbol = {}; // "FT5" or "TwelveData"
   for (const pair of PAIRS) {
     try {
-      rawBySymbol[pair.symbol] = await fetchRawDailyValues(pair.symbol, env.TWELVE_DATA_API_KEY);
+      const fetched = await fetchRawDailyValuesAuto(pair.symbol, env.TWELVE_DATA_API_KEY);
+      rawBySymbol[pair.symbol] = fetched.raw;
+      sourceBySymbol[pair.symbol] = fetched.source;
+      log.push(`${pair.label} data: ${fetched.note}`);
       anyOk = true;
     } catch (e) {
       log.push(`${pair.label} error: ${e.message}`);
@@ -167,7 +179,7 @@ async function runCheck(env, opts) {
   for (const pair of PAIRS) {
     const bars = barsBySymbol[pair.symbol];
     if (!bars) continue;
-    const r = analysePair(pair, bars, weeklySrcBySymbol[pair.symbol]);
+    const r = analysePair(pair, bars, weeklySrcBySymbol[pair.symbol], sourceBySymbol[pair.symbol] === "FT5");
     if (r.note) log.push(r.note);
     lines.push(...r.lines);
   }

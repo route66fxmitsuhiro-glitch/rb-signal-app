@@ -195,6 +195,70 @@
     return processDailyBars(await fetchRawDailyValues(symbol, apiKey), { keepSunday: false });
   }
 
+  // ========== FT5データを優先し、古すぎる場合だけTwelve Dataへフォールバック ==========
+  // 2026-09-06: Twelve Data(サードパーティAPI)とFT5(EAの実機検証に使われてきた
+  // Standard Data Feed/Forexite)のOHLCが数〜十数pips食い違い、日足RideThinの
+  // N=1ブレイク判定が最大3割ほど狂いうることが判明したため、EAと同じデータへの
+  // 切り替えを目指す。PC側で ft5_export/export_daily.py を実行して生成した
+  // data/ft5_daily.json(GitHub Pagesでホスト)を最優先で読み、ユーザーがFT5の
+  // データ更新・エクスポートを怠って古くなっている場合だけ、黙って古いデータを
+  // 使わずTwelve Dataへ自動フォールバックする(どちらを使ったかは必ず表示する)。
+  const FT5_EXPORT_URL = "https://route66fxmitsuhiro-glitch.github.io/rb-signal-app/data/ft5_daily.json";
+  const FT5_MAX_STALE_TRADING_DAYS = 1; // 直近の確定日足からこれを超えて営業日が経っていたら古すぎると判断
+
+  // 土日を除いた営業日数で dateA(exclusive)から dateB(exclusive)までの日数を数える。
+  function tradingDaysBetween(dateA, dateB) {
+    let d = new Date(dateA + "T00:00:00Z");
+    const end = new Date(dateB + "T00:00:00Z");
+    let count = 0;
+    while (d < end) {
+      d.setUTCDate(d.getUTCDate() + 1);
+      const wd = d.getUTCDay();
+      if (wd !== 0 && wd !== 6) count++;
+    }
+    return count;
+  }
+
+  let ft5ExportCache; // モジュール内キャッシュ(undefined=未取得、null=取得失敗、object=成功)
+  async function fetchFT5Export() {
+    if (ft5ExportCache !== undefined) return ft5ExportCache;
+    try {
+      const res = await fetch(FT5_EXPORT_URL, { cache: "no-store" });
+      if (!res.ok) {
+        ft5ExportCache = null;
+      } else {
+        ft5ExportCache = await res.json();
+      }
+    } catch (e) {
+      ft5ExportCache = null;
+    }
+    return ft5ExportCache;
+  }
+
+  // FT5エクスポートを優先し、無い/古すぎる場合だけTwelve Dataを取得する。
+  // 戻り値: { raw, source, note }。raw は fetchRawDailyValues と同じ形式の配列。
+  async function fetchRawDailyValuesAuto(symbol, apiKey) {
+    const exp = await fetchFT5Export();
+    const arr = exp && exp.pairs && exp.pairs[symbol];
+    if (arr && arr.length) {
+      const lastDate = arr[arr.length - 1].date;
+      const today = todayStr();
+      const staleTradingDays = tradingDaysBetween(lastDate, today);
+      if (staleTradingDays <= FT5_MAX_STALE_TRADING_DAYS) {
+        return { raw: arr, source: "FT5", note: `FT5(実機データ、${lastDate}時点)` };
+      }
+      const raw = await fetchRawDailyValues(symbol, apiKey);
+      return {
+        raw,
+        source: "TwelveData",
+        note: `Twelve Data(FT5データが${lastDate}時点で${staleTradingDays}営業日古いため自動切替。` +
+          `PCでFT5データ更新→エクスポートを実行してください)`,
+      };
+    }
+    const raw = await fetchRawDailyValues(symbol, apiKey);
+    return { raw, source: "TwelveData", note: "Twelve Data(FT5エクスポートが見つかりません)" };
+  }
+
   // ========== 計算ロジック ==========
 
   // ATR14(単純平均、EAのComputeATR14()相当。Wilder平滑化ではない点に注意)
@@ -452,6 +516,7 @@
     mergeWeekendIntoWeekdays,
     isDegenerateBar,
     fetchRawDailyValues,
+    fetchRawDailyValuesAuto,
     processDailyBars,
     fetchDailyBars,
     computeATR14,
