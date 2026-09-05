@@ -249,6 +249,39 @@ h2 {
   margin: 0 0 10px;
 }
 
+.verify-help {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+}
+
+.verify-help summary {
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 0.86rem;
+  color: var(--text);
+  list-style: revert;
+}
+
+.verify-help-body {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.verify-help-body p {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  margin: 0 0 8px;
+  line-height: 1.5;
+}
+
+.verify-help-body p:last-child {
+  margin-bottom: 0;
+}
+
 .empty-note {
   font-size: 0.84rem;
   color: var(--text-dim);
