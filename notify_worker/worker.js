@@ -487,6 +487,7 @@
 const SC = globalThis.SignalCore;
 const {
   PAIRS,
+  dowOf,
   fetchRawDailyValues,
   processDailyBars,
   computeATR14,
@@ -562,9 +563,16 @@ function analysePair(pair, bars, weeklySrcBars) {
 
   const lines = [];
   if (dailySignal && dailySignal.direction) {
+    // 判定に日曜の薄商いバーが使われている場合の注記(2026-09-05、詳細はCLAUDE.md参照)。
+    // 月曜=前日が日曜足(全体寄与3.8%・勝率43%で見送っても影響小)、
+    // 火曜=前々日が日曜足(全体寄与32%で最大・チャートでは再現できないため本判定を優先すべき)。
+    let sunTag = "";
+    if (dowOf(dailySignal.prevBar.date) === 0) sunTag = "(月曜・薄商いバー由来、見送り可)";
+    else if (dowOf(dailySignal.prevPrevBar.date) === 0) sunTag = "(火曜・薄商いバー由来、チャート未表示でも本判定を優先)";
     lines.push(
       `${pair.label} 日足${dirLabel(dailySignal.direction)}` +
         (dailySignal.outside ? "(アウトサイド)" : "") +
+        sunTag +
         ` [前日高${fmtPrice(dailySignal.prevBar.high, pair.symbol)}/安${fmtPrice(dailySignal.prevBar.low, pair.symbol)} ATR14=${fmtPrice(atr14, pair.symbol)}]`
     );
   }

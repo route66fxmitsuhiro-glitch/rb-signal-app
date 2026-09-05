@@ -15,6 +15,7 @@ const {
   USD_OUTSIDE,
   weekKeyOf,
   todayStr,
+  dowOf,
   addTradingDays,
   fetchRawDailyValues,
   processDailyBars,
@@ -352,6 +353,31 @@ function renderWeeklyPreview(previewSignal, symbol) {
   `;
 }
 
+// 日足RideThinの判定根拠に日曜の立ち上がりバー(通常のブローカーのチャートには
+// 表示されない)が使われている場合の注記。2026-09-05の紙トレード照合・1分足試算
+// (sim_sunday_bar_ablation.py)で判明した実績を踏まえた文言:
+//   月曜のエントリー: 全体pipsへの寄与3.8%・勝率43.4%(全曜日中最弱) → 見送っても影響小
+//   火曜のエントリー: 全体pipsへの寄与32%(最大)・勝率62.2% → 必ず拾うべき、ただし
+//     判定根拠(前々日)がチャートで確認できないためアプリの判定を信頼する必要がある
+function sundayNote(dsig) {
+  if (!dsig || !dsig.prevBar || !dsig.prevPrevBar) return "";
+  const prevIsSun = dowOf(dsig.prevBar.date) === 0;
+  const prevPrevIsSun = dowOf(dsig.prevPrevBar.date) === 0;
+  if (prevIsSun) {
+    return `<p class="section-note">⚠️ 月曜のエントリー候補です。判定に使う「前日」(${dsig.prevBar.date})は
+      市場再開直後の薄商いバーで、通常のブローカーのチャートには表示されません。ただし月曜エントリーは
+      実績上、全体成績への寄与が小さく(過去統計で全体pipsの約4%)、勝率も全曜日中最弱(約43%)です。
+      この時間帯に対応できないなら見送っても大きな機会損失にはなりません。</p>`;
+  }
+  if (prevPrevIsSun) {
+    return `<p class="section-note">⚠️ 火曜のエントリー候補です。判定に使う「前々日」(${dsig.prevPrevBar.date})が
+      市場再開直後の薄商いバーのため、ご自身のブローカーのチャートで前日・前々日を見比べても再現できません。
+      チャートの見た目と食い違って見えても、このアプリの判定を採用してください
+      (過去統計でこの曜日のエントリーが全曜日中最大の寄与・良好な勝率を記録しています)。</p>`;
+  }
+  return "";
+}
+
 // USDJPYアウトサイドデイ継続レイヤーの表示ブロック。シグナルの有無にかかわらず
 // 判定根拠(アウトサイドデイ成否・ER・ゲート状態)を必ず出す。
 function renderUsdOutsideBlock(sig, symbol) {
@@ -459,6 +485,7 @@ function renderSignals(results) {
           → 前日 高${fmtPrice(dsig.prevBar.high, r.symbol)}/安${fmtPrice(dsig.prevBar.low, r.symbol)}(${dsig.prevBar.date}、
           ${dsig.prevBar.close >= dsig.prevBar.open ? "陽線" : "陰線"})
         </div>
+        ${sundayNote(dsig)}
         <table class="tranche-table">
           <thead><tr><th>枠</th><th>枚数</th><th>目標(pips)</th><th>初期逆指値目安</th></tr></thead>
           <tbody>
@@ -495,6 +522,7 @@ function renderSignals(results) {
           → 前日 高${fmtPrice(dsig.prevBar.high, r.symbol)}/安${fmtPrice(dsig.prevBar.low, r.symbol)}(${dsig.prevBar.date}、
           高値更新: ${dsig.brokeHigh ? "○" : "×"} / 安値更新: ${dsig.brokeLow ? "○" : "×"})
         </div>
+        ${sundayNote(dsig)}
       `;
     }
 
