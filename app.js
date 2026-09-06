@@ -15,6 +15,7 @@ const {
   USD_OUTSIDE,
   weekKeyOf,
   todayStr,
+  isBeforeDailyClose,
   dowOf,
   addTradingDays,
   fetchRawDailyValuesAuto,
@@ -1471,7 +1472,13 @@ async function fetchAndRender() {
     state.lastResults = results;
     renderSignals(results);
     renderPositions(freshBySymbol);
+    // 日足の区切りは毎朝9:00 JST。それより前は直近バーがまだ確定していないため、
+    // ここで表示している判定・撤退ラインは「1本前の確定バーまで」の状態であり、
+    // EAが本日の新規建てを判断する時点(朝9:00)の状態とは異なる。
+    const preClose = isBeforeDailyClose();
     statusEl.textContent = `取得完了(${new Date().toLocaleString("ja-JP")}) — ${sourceNotes.join(" / ")}`;
+    const warnEl = document.getElementById("preCloseWarn");
+    if (warnEl) warnEl.classList.toggle("hidden", !preClose);
   } catch (e) {
     statusEl.textContent = `エラー: ${e.message}`;
     statusEl.classList.add("error");

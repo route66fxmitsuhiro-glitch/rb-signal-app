@@ -94,6 +94,14 @@
       本日の判定を取得
     </button>
     <p id="fetchStatus" class="fetch-status"></p>
+    <p id="preCloseWarn" class="preclose-warn hidden">
+      ⏰ <strong>まだ朝9:00前です。</strong>
+      日足バーは毎朝9:00に確定するため、いま表示しているのは
+      <strong>1本前の確定バーまで</strong>の状態です。
+      EAが本日の新規建てを判断するのは朝9:00の時点なので、
+      <strong>新規エントリーの判定は朝9:00以降にもう一度取得してください</strong>。
+      保有中ポジションの撤退ラインも、朝9:00に更新されます。
+    </p>
 
     <section id="signalsSection" class="hidden">
       <h2>本日の新規シグナル</h2>

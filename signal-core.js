@@ -85,6 +85,41 @@
     return new Date(dateStr + "T12:00:00Z").getUTCDay();
   }
 
+  // 日足バーの区切りは毎朝9:00 JST(=UTC 00:00、FT5の実分足で確認済み)。
+  // つまり日付ラベル D のバーは「JST D 09:00 〜 D+1 08:59」をカバーし、
+  // 完成するのは JST D+1 の朝9:00 である。
+  // この関数は「今まさに形成中のバーの日付ラベル」を返す。朝9:00前にチェックすると
+  // 形成中なのは"前日"ラベルのバーなので、それも未完成として除外する必要がある。
+  // (2026-09-07修正: 以前は暦日 todayStr() で除外していたため、毎朝0:00〜9:00の間は
+  //  まだ形成中のバーを完成扱いしていた。実害として、週明け月曜の朝に「形成中の
+  //  日曜スタブ足の安値」を前日安値とみなし、撤退ラインが本来より約13pipsタイトに
+  //  表示される事象が発生した。)
+  function formingBarDate(now) {
+    const d = now || new Date();
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Tokyo",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(d);
+    const y = parts.find((p) => p.type === "year").value;
+    const m = parts.find((p) => p.type === "month").value;
+    const day = parts.find((p) => p.type === "day").value;
+    const hour = parseInt(parts.find((p) => p.type === "hour").value, 10);
+    const todayJst = `${y}-${m}-${day}`;
+    if (hour >= 9) return todayJst;
+    const dt = new Date(todayJst + "T00:00:00Z");
+    dt.setUTCDate(dt.getUTCDate() - 1);
+    return ymd(dt);
+  }
+
+  // 現在が日本時間の朝9:00前か(=直近バーがまだ確定していない時間帯か)。
+  function isBeforeDailyClose(now) {
+    return formingBarDate(now) !== todayStr(now);
+  }
+
   // dateStr から平日を n 日進めた日付(YYYY-MM-DD)。土日はスキップ、祝日は
   // 考慮しない目安。EAは新しい日足バー確定ごとに保有日数を+1し、HoldDays に
   // 達した最初のティックで手仕舞うため、n=HoldDays でその手仕舞い日に相当する。
@@ -184,9 +219,10 @@
     const merged = mergeWeekendIntoWeekdays(rawBars, keepSunday);
     const bars = merged.filter((b) => !isDegenerateBar(b));
     bars.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-    // 本日分がまだ形成中の可能性があるバーは除外する(保守的な近似)。
-    const today = todayStr();
-    const complete = bars.filter((b) => b.date < today);
+    // まだ形成中のバーを除外する。区切りは毎朝9:00 JSTなので、朝9:00前に
+    // チェックした場合は"前日"ラベルのバーもまだ形成中である(formingBarDate参照)。
+    const forming = formingBarDate();
+    const complete = bars.filter((b) => b.date < forming);
     return complete.length >= 2 ? complete : bars.slice(0, -1);
   }
 
@@ -510,6 +546,8 @@
     ymd,
     weekKeyOf,
     todayStr,
+    formingBarDate,
+    isBeforeDailyClose,
     dowOf,
     addTradingDays,
     mergeBars,

@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v30"; // v30: シグナル判定根拠の検算方法(FT5基準の日足は朝9:00始まり)の説明ブロックを追加
+const CACHE_NAME = "rb-signal-shell-v31"; // v31: 日足の確定は毎朝9:00 JST。朝9:00前に形成中のバーを完成扱いしていたバグを修正(撤退ラインが約13pipsタイトになる実害あり)+朝9:00前の警告表示を追加
 const SHELL_FILES = [
   "./",
   "./index.html",
