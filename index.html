@@ -94,14 +94,30 @@
       本日の判定を取得
     </button>
     <p id="fetchStatus" class="fetch-status"></p>
-    <p id="preCloseWarn" class="preclose-warn hidden">
-      ⏰ <strong>まだ朝9:00前です。</strong>
-      日足バーは毎朝9:00に確定するため、いま表示しているのは
-      <strong>1本前の確定バーまで</strong>の状態です。
-      EAが本日の新規建てを判断するのは朝9:00の時点なので、
-      <strong>新規エントリーの判定は朝9:00以降にもう一度取得してください</strong>。
-      保有中ポジションの撤退ラインも、朝9:00に更新されます。
-    </p>
+    <p id="preCloseWarn" class="preclose-warn hidden"></p>
+
+    <section id="rateShotSection" class="card">
+      <h2>前日バーの取り込み(レート一覧のスクショ)</h2>
+      <p class="section-note">
+        ブローカーのレート一覧を撮って、前日の日足として取り込みます。
+        <strong>平日は朝 05:30〜06:00</strong>(日足が確定する直前)に撮ってください。
+        06:00 を過ぎると H:/L: が当日のセッションにリセットされ、前日の高安が読めなくなります。
+        <strong>金曜のバーは土曜 06:00〜月曜 06:00 の間ならいつでも</strong>撮れます
+        (市場が閉じていて値が固定されているため、こちらの方が確実です)。
+      </p>
+      <p id="rateShotWindow" class="section-note"></p>
+      <div class="btn-row">
+        <label class="btn btn-ghost btn-small" for="rateShotInput">スクショを選ぶ</label>
+        <input id="rateShotInput" type="file" accept="image/*" hidden />
+        <button id="rateShotRead" class="btn btn-primary btn-small" type="button" disabled>
+          AIで読み取る
+        </button>
+        <button id="rateShotClear" class="btn btn-ghost btn-small" type="button">クリア</button>
+      </div>
+      <p id="rateShotStatus" class="fetch-status"></p>
+      <img id="rateShotPreview" class="shot-preview hidden" alt="レート一覧のスクショ" />
+      <div id="rateShotReview" class="hidden"></div>
+    </section>
 
     <section id="signalsSection" class="hidden">
       <h2>本日の新規シグナル</h2>

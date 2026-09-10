@@ -489,6 +489,185 @@
     return pairCode < "GBPJPY" ? 1 : 0;
   }
 
+  // ========== ブローカーのレート一覧スクショから日足を再構成する ==========
+  // 2026-09-10、FT5の毎日更新が負担なため導入。GMOクリック証券のレート一覧には
+  // 四本値が無いが、BID / H: / L: / 前日比 の4つから直前セッションのOHLCを組める。
+  //
+  //   高値 = H:            安値 = L:            終値 = BID
+  //   始値 = BID − 前日比  (前日比の基準＝前セッションの終値＝当セッションの始値)
+  //
+  // 【撮影時刻】ブローカーの日足は JST 06:00 に確定しリセットされる(ユーザー確認済み)。
+  // 06:00を過ぎるとH:/L:が新セッションにリセットされ、閉じたバーの高安が失われるため、
+  // **5:50頃(確定の直前)に撮る**必要がある。この時点でバーは厳密には未確定だが、
+  // 残り10分の差は誤差として許容する(ユーザー判断)。
+  //
+  // 【日付ラベル】JST D日 5:50 に撮ったスクショが完成させるのは、
+  // D-1日 06:00 に始まったセッション。FT5のD1もセッション開始日をラベルにしている
+  // ため、ラベルは **D-1** になる。
+
+  // 前日比の単位はそのペアの表示最小桁(JPYクロス=0.001、ドルストレート=0.00001)。
+  function quoteDecimals(symbol) {
+    return symbol.endsWith("JPY") ? 3 : 5;
+  }
+
+  // レート一覧の1ペア分から直前セッションのOHLCを組む。
+  //   q = { bid, high, low, change }  change は最小桁単位の整数(例: GBPJPY 174 = 0.174)
+  function reconstructBarFromQuote(symbol, q, dateLabel) {
+    const dec = quoteDecimals(symbol);
+    const unit = Math.pow(10, -dec);
+    const round = (v) => Number(v.toFixed(dec));
+    const open = round(q.bid - q.change * unit);
+    return {
+      date: dateLabel,
+      open: open,
+      high: round(q.high),
+      low: round(q.low),
+      close: round(q.bid),
+      src: "shot",
+    };
+  }
+
+  // 再構成したバーの健全性検査。1桁の誤読が履歴に入ると以後ずっと汚染されるため
+  // (教訓78: データ誤りはEA側では防げない)、追記前に必ず通す。
+  //   prev … 直前の確定バー(あれば)。ギャップと値幅の異常を見る。
+  //   atr  … 直近のATR14(あれば)。値幅の妥当性判定に使う。
+  function validateReconstructedBar(symbol, bar, prev, atr) {
+    const dec = quoteDecimals(symbol);
+    const unit = Math.pow(10, -dec);
+    const pip = symbol.endsWith("JPY") ? 0.01 : 0.0001;
+    const errors = [];
+    const warnings = [];
+
+    if (![bar.open, bar.high, bar.low, bar.close].every((v) => Number.isFinite(v))) {
+      errors.push("数値として読めない項目があります");
+      return { errors: errors, warnings: warnings };
+    }
+    if (bar.high < bar.low) errors.push("高値が安値を下回っています");
+    if (bar.high < Math.max(bar.open, bar.close) - unit / 2) {
+      errors.push(`高値が始値/終値より低い(${((Math.max(bar.open, bar.close) - bar.high) / pip).toFixed(1)}pips)`);
+    }
+    if (bar.low > Math.min(bar.open, bar.close) + unit / 2) {
+      errors.push(`安値が始値/終値より高い(${((bar.low - Math.min(bar.open, bar.close)) / pip).toFixed(1)}pips)`);
+    }
+
+    const range = (bar.high - bar.low) / pip;
+    if (atr != null && atr > 0) {
+      const atrPips = atr / pip;
+      if (range > atrPips * 4) warnings.push(`値幅${range.toFixed(0)}pipsがATR14の4倍超(${atrPips.toFixed(0)}pips)`);
+      if (range < atrPips * 0.15) warnings.push(`値幅${range.toFixed(0)}pipsがATR14の15%未満`);
+    }
+    if (prev) {
+      const gap = Math.abs(bar.open - prev.close) / pip;
+      // 前セッションの終値＝当セッションの始値なので、本来ほぼ一致するはず。
+      // 週明け(月曜)だけは週末ギャップで離れうる。
+      const isMonday = dowOf(bar.date) === 1;
+      const limit = isMonday ? (atr ? (atr / pip) * 1.5 : 200) : 20;
+      if (gap > limit) {
+        warnings.push(`前日終値との差が${gap.toFixed(0)}pips(${isMonday ? "週明け" : "通常日"}の想定を超過)`);
+      }
+    }
+    return { errors: errors, warnings: warnings };
+  }
+
+  // スクショを撮った時刻から、完成させるバーの日付ラベルと撮影窓の状態を返す。
+  function screenshotSessionLabel(now) {
+    const d = now || new Date();
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    }).formatToParts(d);
+    const get = (t) => parts.find((p) => p.type === t).value;
+    const jstDate = `${get("year")}-${get("month")}-${get("day")}`;
+    const hh = parseInt(get("hour"), 10);
+    const mm = parseInt(get("minute"), 10);
+    const jstDow = dowOf(jstDate); // 0=日, 1=月, ... 6=土
+    // ラベル = 撮影日の前日。土日をまたぐ場合は直前の金曜まで戻る
+    // (セッションは月〜金の 06:00 にしか始まらないため)。
+    const label = lastCapturableSessionLabel(d);
+
+    // 【市場が閉じている時間帯(土06:00 〜 月06:00)】
+    // ユーザー確認済み: この間もレート一覧は金曜セッションの値を保持する。
+    // よって週末はいつ撮っても金曜のバーが確定値で取れる(最も安全)。
+    const frozen =
+      (jstDow === 6 && hh >= 6) || // 土曜 06:00以降
+      jstDow === 0 ||              // 日曜(終日)
+      (jstDow === 1 && hh < 6);    // 月曜 06:00前
+    if (frozen) {
+      return {
+        label: label, jstDate: jstDate, state: "frozen",
+        note: "市場が閉じており、画面は金曜セッションの確定値のまま止まっています。" +
+          "週末のうちに撮ったものなら、月曜 06:00 までいつアップしても構いません。",
+      };
+    }
+
+    // 【市場が開いている時間帯】06:00 を過ぎると H:/L: が今日のセッションに
+    // リセットされ、閉じたバーの高安を復元できなくなる。
+    if (hh >= 6) {
+      return {
+        label: label, jstDate: jstDate, state: "late",
+        note: "撮影時刻が JST 06:00 より後です。H:/L: は進行中セッションのもので、" +
+          "直前バーの高安ではありません。明朝 05:30〜06:00 に撮り直してください。",
+      };
+    }
+    if (hh < 5 || (hh === 5 && mm < 30)) {
+      return {
+        label: label, jstDate: jstDate, state: "early",
+        note: "JST 05:30 より前です。バーの残り時間が長く、高安・終値がまだ動きます。",
+      };
+    }
+    return { label: label, jstDate: jstDate, state: "ok", note: "" };
+  }
+
+  // いま時点で「既に閉じている最後のセッション」のラベル。履歴がどこまで
+  // 揃っているべきかの目標値であり、これに足りない分をTwelve Dataで補完する。
+  //
+  // セッション S(x) は x日 06:00 に始まり x+1日 06:00 に閉じる(JST)。
+  //   JST D日 06:00 より前 … 進行中は S(D-1)。5:50のスクショはこれを捉える。
+  //   JST D日 06:00 以降   … 進行中は S(D)。閉じた最後は S(D-1)。
+  // どちらの場合も目標は D-1。ただし D-1 が土日ならセッションが無いので
+  // 直前の金曜まで戻る(月曜朝なら金曜、日曜朝なら金曜)。
+  function lastCapturableSessionLabel(now) {
+    const d = now || new Date();
+    const jst = todayStr(d);
+    let label = shiftDate(jst, -1);
+    let guard = 0;
+    while ((dowOf(label) === 0 || dowOf(label) === 6) && guard++ < 7) {
+      label = shiftDate(label, -1);
+    }
+    return label;
+  }
+
+  // 複数ソースの日足を1本の系列にまとめる。同じ日付は優先度の高いソースを採る。
+  //   優先度: shot(ブローカー実物) > ft5(実機と同じ日足) > td(Twelve Data補完)
+  const BAR_SOURCE_RANK = { shot: 3, ft5: 2, td: 1 };
+  function mergeBarSeries() {
+    const byDate = new Map();
+    for (let i = 0; i < arguments.length; i++) {
+      const arr = arguments[i] || [];
+      for (const b of arr) {
+        const cur = byDate.get(b.date);
+        const rank = BAR_SOURCE_RANK[b.src] || 0;
+        if (!cur || rank > (BAR_SOURCE_RANK[cur.src] || 0)) byDate.set(b.date, b);
+      }
+    }
+    return [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  }
+
+  // 系列の中で欠けている営業日(月〜金)を洗い出す。Twelve Dataでの補完対象。
+  function missingTradingDays(bars, throughLabel) {
+    if (!bars.length) return [];
+    const have = new Set(bars.map((b) => b.date));
+    const out = [];
+    let d = bars[bars.length - 1].date;
+    while (d < throughLabel) {
+      d = shiftDate(d, 1);
+      const wd = dowOf(d);
+      if (wd === 0 || wd === 6) continue; // 土日はバーが存在しない
+      if (!have.has(d)) out.push(d);
+    }
+    return out;
+  }
+
   // ========== 衛星9層のシグナル判定 ==========
   // EAのバー添字 index i は「末尾からi本目」。bars は昇順なので at(bars,1)=前日、
   // at(bars,2)=前々日。EAの High(1) / Close(2) 等とそのまま対応する。
@@ -819,9 +998,17 @@
     formingBarDate,
     nextBarCloseJst,
     shiftDate,
+    quoteDecimals,
+    reconstructBarFromQuote,
+    validateReconstructedBar,
+    screenshotSessionLabel,
+    lastCapturableSessionLabel,
+    mergeBarSeries,
+    missingTradingDays,
     dowOf,
     addTradingDays,
     isDegenerateBar,
+    fetchFT5Export,
     fetchTwelveDataDaily,
     calibrateShift,
     fetchRawDailyValuesAuto,

@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v33"; // v33: balanced対応。衛星9層(実機ログと95.9%一致)・コアのロット倍率(日足ride×0.5/週足T01×0.334/ride×0.167)・5ペア取得
+const CACHE_NAME = "rb-signal-shell-v34"; // v34: ブローカーのレート一覧スクショから前日バーを取り込む機能。FT5土台+スクショ上書き+欠損はTwelve Data補完
 const SHELL_FILES = [
   "./",
   "./index.html",

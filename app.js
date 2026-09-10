@@ -20,7 +20,17 @@ const {
   dowOf,
   addTradingDays,
   fetchRawDailyValuesAuto,
+  fetchFT5Export,
+  fetchTwelveDataDaily,
   processDailyBars,
+  shiftDate,
+  quoteDecimals,
+  reconstructBarFromQuote,
+  validateReconstructedBar,
+  screenshotSessionLabel,
+  lastCapturableSessionLabel,
+  mergeBarSeries,
+  missingTradingDays,
   computeATR14,
   computeDailySignal,
   computeAvgER,
@@ -1471,6 +1481,359 @@ function manualAddPosition() {
   renderPositions(state.lastFetch);
 }
 
+// ========== ブローカーのレート一覧スクショから日足を取り込む ==========
+// 2026-09-10導入。FT5の毎日更新が負担なため、GMOクリック証券のレート一覧を
+// 撮って前日バーの入力にする。詳細は signal-core.js の
+// reconstructBarFromQuote / screenshotSessionLabel のコメントを参照。
+//
+// 保存するのは**スクショ由来のバーだけ**。FT5エクスポート(120本)は毎回
+// 取得して土台にし、その上にスクショ由来を重ねる(mergeBarSeries の優先度は
+// shot > ft5 > td)。こうすると localStorage が小さいまま保て、FT5を久しぶりに
+// 更新したときもその結果が自然に反映される。
+const LS_BARHIST = "rb_bar_history_v1";
+const LS_RATESHOT = "rb_rate_shot"; // 直近のスクショ(sessionStorage、目視用)
+
+// アプリが使う5ペア。スクショにはEUR/USDやGBL/JPYも写るが対象外。
+const SHOT_SYMBOLS = ["GBP/JPY", "GBP/USD", "USD/JPY", "AUD/JPY", "EUR/JPY"];
+
+function loadBarHistory() {
+  try {
+    const raw = localStorage.getItem(LS_BARHIST);
+    const obj = raw ? JSON.parse(raw) : {};
+    return obj && typeof obj === "object" ? obj : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveBarHistory(h) {
+  try {
+    localStorage.setItem(LS_BARHIST, JSON.stringify(h));
+  } catch (e) {
+    alert("履歴の保存に失敗しました(localStorageが一杯の可能性があります)");
+  }
+}
+
+// スクショ由来のバーを履歴に追記する。同じ日付は上書き。
+function appendShotBars(bars) {
+  const h = loadBarHistory();
+  for (const symbol of Object.keys(bars)) {
+    const arr = (h[symbol] || []).filter((b) => b.date !== bars[symbol].date);
+    arr.push(bars[symbol]);
+    arr.sort((a, b) => (a.date < b.date ? -1 : 1));
+    // 週足ATR14に日足75本要るので、余裕を見て200本だけ残す
+    h[symbol] = arr.slice(-200);
+  }
+  saveBarHistory(h);
+}
+
+const RATE_SHOT_SCHEMA = {
+  type: "object",
+  properties: {
+    pairs: {
+      type: "array",
+      description: "画面に写っている通貨ペアすべて",
+      items: {
+        type: "object",
+        properties: {
+          symbol: { type: "string", description: "GBP/JPY のようなスラッシュ区切りの表記" },
+          bid: { type: "number", description: "BID欄の値。大きい数字と右肩の小さい数字を連結した完全な値" },
+          high: { type: "number", description: "H: の右の値" },
+          low: { type: "number", description: "L: の右の値" },
+          change: { type: "number", description: "前日比の整数値。符号も含める" },
+        },
+        required: ["symbol", "bid", "high", "low", "change"],
+      },
+    },
+  },
+  required: ["pairs"],
+};
+
+const RATE_SHOT_PROMPT =
+  "これはFXブローカーのレート一覧画面です。各通貨ペアについて次の4つを読み取ってください。\n" +
+  "1) BID: 「1.16」「208.」のような通常サイズの部分、その次の大きい2桁、" +
+  "さらに右肩の小さい1桁を、すべて連結した完全な数値。" +
+  "例: 「1.16」+大きい「38」+小さい「6」→ 1.16386、「208.」+大きい「12」+小さい「3」→ 208.123\n" +
+  "2) H: の右の値(その日の高値)\n" +
+  "3) L: の右の値(その日の安値)\n" +
+  "4) 前日比の整数値(マイナスならマイナスを付ける)\n\n" +
+  "通貨ペア名の下にある小さい数字はスプレッドなので読み取り不要です。" +
+  "ASK欄も不要です。写っているペアはすべて返してください。" +
+  "数字が読み取れないペアは配列に含めないでください。";
+
+// スクショをAIに読ませて、5ペア分のバーを再構成する。
+async function readRateShot(dataUrl, mediaType) {
+  const key = (state.settings.anthropicKey || "").trim();
+  if (!key) throw new Error("設定でAnthropic APIキーを入力してください");
+  const b64 = dataUrl.split(",")[1];
+  const model = state.settings.visionModel || "claude-opus-5";
+  const outputConfig = { format: { type: "json_schema", schema: RATE_SHOT_SCHEMA } };
+  if (model.indexOf("haiku") === -1) outputConfig.effort = "low";
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 2048,
+      output_config: outputConfig,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: mediaType, data: b64 } },
+            { type: "text", text: RATE_SHOT_PROMPT },
+          ],
+        },
+      ],
+    }),
+  });
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try {
+      const j = await res.json();
+      if (j && j.error && j.error.message) msg = j.error.message;
+    } catch (e) {}
+    throw new Error(msg);
+  }
+  const json = await res.json();
+  const block = (json.content || []).find((c) => c.type === "text");
+  if (!block) throw new Error("AIの応答を解釈できませんでした");
+  let parsed;
+  try {
+    parsed = JSON.parse(block.text);
+  } catch (e) {
+    throw new Error("AIの応答がJSONではありません");
+  }
+  return parsed.pairs || [];
+}
+
+// 読み取り結果 → 再構成 + 検査。表示用の行配列を返す。
+function buildShotRows(pairs, label) {
+  const hist = loadBarHistory();
+  const rows = [];
+  for (const symbol of SHOT_SYMBOLS) {
+    const q = pairs.find(
+      (p) => (p.symbol || "").replace(/\s/g, "").toUpperCase() === symbol.replace("/", "/").toUpperCase()
+    );
+    if (!q) {
+      rows.push({ symbol, missing: true });
+      continue;
+    }
+    const bar = reconstructBarFromQuote(symbol, q, label);
+    const fresh = state.lastFetch && state.lastFetch[symbol];
+    const prevBars = (fresh && fresh.daily && fresh.daily.bars) || hist[symbol] || [];
+    const prev = prevBars.length ? prevBars[prevBars.length - 1] : null;
+    const atr = fresh && fresh.daily ? fresh.daily.atr14 : null;
+    const check = validateReconstructedBar(symbol, bar, prev, atr);
+    rows.push({ symbol, quote: q, bar, prev, check });
+  }
+  return rows;
+}
+
+function renderShotReview(rows, session) {
+  const el = document.getElementById("rateShotReview");
+  if (!el) return;
+  const stateLabel = {
+    ok: '<span class="badge long">○ 使えます(セッション終了10分前)</span>',
+    frozen: '<span class="badge long">◎ 使えます(市場が閉じていて確定値)</span>',
+    early: '<span class="badge warn">△ まだ値が動きます</span>',
+    late: '<span class="badge short">× 撮影時刻が遅すぎます</span>',
+  }[session.state];
+
+  let h = `<div class="pair-meta">${stateLabel}
+    対象バー: <b>${session.label}</b>(${"日月火水木金土"[dowOf(session.label)]}曜)</div>`;
+  if (session.note) h += `<p class="section-note">${session.note}</p>`;
+
+  h += `<div class="tablewrap"><table class="tranche-table">
+    <thead><tr><th>ペア</th><th>始値</th><th>高値</th><th>安値</th><th>終値</th><th>検査</th></tr></thead><tbody>`;
+  let anyError = false;
+  for (const r of rows) {
+    if (r.missing) {
+      anyError = true;
+      h += `<tr><td>${r.symbol}</td><td colspan="4">読み取れませんでした</td>
+        <td><span class="badge short">NG</span></td></tr>`;
+      continue;
+    }
+    const d = quoteDecimals(r.symbol);
+    const bad = r.check.errors.length > 0;
+    if (bad) anyError = true;
+    const tag = bad
+      ? `<span class="badge short">NG</span> ${r.check.errors.join(" / ")}`
+      : r.check.warnings.length
+      ? `<span class="badge warn">要確認</span> ${r.check.warnings.join(" / ")}`
+      : '<span class="badge long">OK</span>';
+    h += `<tr><td>${r.symbol}</td>
+      <td>${r.bar.open.toFixed(d)}</td><td>${r.bar.high.toFixed(d)}</td>
+      <td>${r.bar.low.toFixed(d)}</td><td>${r.bar.close.toFixed(d)}</td>
+      <td>${tag}</td></tr>`;
+  }
+  h += "</tbody></table></div>";
+  h += `<p class="section-note">
+    <b>画面の数字と1桁ずつ見比べてください。</b>誤った値を取り込むと履歴が汚染され、
+    以後の判定がずっとずれます。違っていたら取り込まずに撮り直すか、
+    設定でモデルを変えて再読み取りしてください。</p>`;
+  h += anyError
+    ? '<p class="section-note">読み取れなかった、または検査に失敗したペアがあるため取り込めません。</p>'
+    : `<button class="btn btn-primary btn-small" id="rateShotCommit">この内容で履歴に取り込む</button>`;
+  el.innerHTML = h;
+  el.classList.remove("hidden");
+
+  const commit = document.getElementById("rateShotCommit");
+  if (commit) {
+    commit.addEventListener("click", () => {
+      const bars = {};
+      for (const r of rows) bars[r.symbol] = r.bar;
+      appendShotBars(bars);
+      el.innerHTML = `<p class="section-note">${session.label} のバーを取り込みました。
+        「本日の判定を取得」を押すと、この値で判定します。</p>`;
+    });
+  }
+}
+
+// 1ペア分の日足系列を組み立てる。
+//
+// 土台 = FT5エクスポート(実機と同じ日足、GitHub Pagesから取得)
+// 上書き = スクショ由来の履歴(ブローカー実物。localStorage)
+// 穴埋め = Twelve Data(撮り忘れ・祝日の保険。欠けている営業日だけ)
+//
+// 優先度は mergeBarSeries が shot > ft5 > td で解決する。
+// スクショで最新まで揃っていれば Twelve Data は呼ばない(APIコールの節約と、
+// 精度の低いデータを混ぜないため)。
+async function acquireBars(symbol, apiKey) {
+  const exp = await fetchFT5Export();
+  const ft5 = ((exp && exp.pairs && exp.pairs[symbol]) || []).map((b) =>
+    Object.assign({}, b, { src: "ft5" })
+  );
+  const shots = loadBarHistory()[symbol] || [];
+  let bars = mergeBarSeries(ft5, shots);
+
+  const target = lastCapturableSessionLabel();
+  let gaps = missingTradingDays(bars, target);
+
+  const parts = [];
+  if (ft5.length) parts.push(`FT5 ${ft5.length}本`);
+  if (shots.length) parts.push(`スクショ ${shots.length}本`);
+
+  if (gaps.length) {
+    if (!apiKey) {
+      parts.push(`⚠未取得 ${gaps.length}日(APIキー未設定で補完できません)`);
+    } else {
+      try {
+        const td = (await fetchTwelveDataDaily(symbol, apiKey))
+          .filter((b) => gaps.indexOf(b.date) >= 0)
+          .map((b) => Object.assign({}, b, { src: "td" }));
+        bars = mergeBarSeries(bars, td);
+        const still = missingTradingDays(bars, target);
+        if (td.length) parts.push(`Twelve Data補完 ${td.length}本`);
+        if (still.length) parts.push(`⚠未取得 ${still.length}日(${still.join(", ")})`);
+        gaps = still;
+      } catch (e) {
+        parts.push(`⚠Twelve Data補完に失敗(${e.message})`);
+      }
+    }
+  }
+  if (bars.length) {
+    const last = bars[bars.length - 1];
+    parts.push(`最終 ${last.date}(${{ shot: "スクショ", ft5: "FT5", td: "TD" }[last.src] || "?"})`);
+  }
+  return { bars: processDailyBars(bars, { dropForming: false }), note: parts.join(" / "), gaps: gaps };
+}
+
+function describeShotWindow() {
+  const el = document.getElementById("rateShotWindow");
+  if (!el) return;
+  const s = screenshotSessionLabel();
+  const dow = "日月火水木金土"[dowOf(s.label)];
+  const tag = {
+    ok: '<span class="badge long">○ いま撮れば使えます</span>',
+    frozen: '<span class="badge long">◎ 市場が閉じています(確定値)</span>',
+    early: '<span class="badge warn">△ まだ値が動きます</span>',
+    late: '<span class="badge short">× いま撮っても使えません</span>',
+  }[s.state];
+  el.innerHTML =
+    `${tag} いま撮ると <b>${s.label}(${dow})</b> のバーとして取り込みます。` +
+    (s.note ? `<br>${s.note}` : "");
+}
+
+function initRateShotUI() {
+  const input = document.getElementById("rateShotInput");
+  const readBtn = document.getElementById("rateShotRead");
+  const clearBtn = document.getElementById("rateShotClear");
+  const prev = document.getElementById("rateShotPreview");
+  const statusEl = document.getElementById("rateShotStatus");
+  const review = document.getElementById("rateShotReview");
+  if (!input) return;
+  describeShotWindow();
+
+  let current = null; // { dataUrl, mediaType }
+
+  function show(dataUrl, mediaType) {
+    current = dataUrl ? { dataUrl: dataUrl, mediaType: mediaType } : null;
+    if (dataUrl) {
+      prev.src = dataUrl;
+      prev.classList.remove("hidden");
+      readBtn.disabled = false;
+    } else {
+      prev.removeAttribute("src");
+      prev.classList.add("hidden");
+      readBtn.disabled = true;
+    }
+    review.classList.add("hidden");
+    review.innerHTML = "";
+    statusEl.textContent = "";
+    statusEl.classList.remove("error");
+  }
+
+  input.addEventListener("change", () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const r = await downscaleImage(reader.result, 1568);
+      show(r.dataUrl, r.mediaType);
+      try { sessionStorage.setItem(LS_RATESHOT, r.dataUrl); } catch (e) {}
+      describeShotWindow();
+    };
+    reader.readAsDataURL(file);
+    input.value = "";
+  });
+
+  clearBtn.addEventListener("click", () => {
+    show(null);
+    try { sessionStorage.removeItem(LS_RATESHOT); } catch (e) {}
+  });
+
+  readBtn.addEventListener("click", async () => {
+    if (!current) return;
+    readBtn.disabled = true;
+    statusEl.classList.remove("error");
+    statusEl.textContent = "AIが読み取り中…(数秒〜十数秒)";
+    try {
+      const session = screenshotSessionLabel();
+      const pairs = await readRateShot(current.dataUrl, current.mediaType);
+      const rows = buildShotRows(pairs, session.label);
+      statusEl.textContent = `読み取り完了(${pairs.length}ペアを検出)。内容を確認してください。`;
+      renderShotReview(rows, session);
+    } catch (e) {
+      statusEl.textContent = `エラー: ${e.message}`;
+      statusEl.classList.add("error");
+    } finally {
+      readBtn.disabled = false;
+    }
+  });
+
+  try {
+    const saved = sessionStorage.getItem(LS_RATESHOT);
+    if (saved) show(saved, saved.indexOf("image/png") >= 0 ? "image/png" : "image/jpeg");
+  } catch (e) {}
+}
+
 // ========== メインフロー ==========
 
 async function fetchAndRender() {
@@ -1493,13 +1856,13 @@ async function fetchAndRender() {
   const sourceNotes = []; // どのペアがFT5/Twelve Dataどちらから来たかの一覧(取得ステータス表示用)
   const barsBySymbol = {}; // 衛星9層・ERゲート用(コア3 + AUDJPY/EURJPY)
   try {
-    // 1) データ取得は5ペア(コア3 + 衛星専用のAUDJPY/EURJPY)
+    // 1) データ取得は5ペア(コア3 + 衛星専用のAUDJPY/EURJPY)。
+    //    FT5エクスポートを土台に、スクショ由来の履歴を重ね、欠けた営業日だけ
+    //    Twelve Dataで埋める(acquireBars 参照)。
     for (const p of ALL_PAIRS) {
-      const fetched = await fetchRawDailyValuesAuto(p.symbol, s.apiKey);
-      rawBySymbol[p.symbol] = fetched.raw;
-      dropFormingBySymbol[p.symbol] = fetched.dropForming;
-      sourceNotes.push(`${p.label}: ${fetched.note}`);
-      barsBySymbol[p.symbol] = processDailyBars(fetched.raw, { dropForming: fetched.dropForming });
+      const got = await acquireBars(p.symbol, s.apiKey);
+      barsBySymbol[p.symbol] = got.bars;
+      sourceNotes.push(`${p.label}: ${got.note}`);
     }
     // 2) コア(日足RideThin・週足ドンチャン)の解析は3ペアだけ
     for (const p of PAIRS) {
@@ -1678,6 +2041,7 @@ function init() {
   document.getElementById("entryModalCancel").addEventListener("click", closeEntryModal);
   document.getElementById("entryModalConfirm").addEventListener("click", confirmEntry);
   initOrderShotUI();
+  initRateShotUI();
   renderPositions(null);
 
   if ("serviceWorker" in navigator) {
