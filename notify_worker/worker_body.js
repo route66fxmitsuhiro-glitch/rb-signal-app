@@ -219,7 +219,9 @@ async function runCheck(env, opts) {
         const aer = sg.avgER != null ? sg.avgER.toFixed(3) : "n/a";
         log.push(
           `${sg.label}: 基準=${sg.referenceDate || sg.referenceWeek || "?"} ` +
-            `dir=${sg.rawDirection} avgER=${aer}(${sg.gate}ゲート 閾値${sg.erThreshold}) → ` +
+            `dir=${sg.rawDirection} avgER=${aer}(` +
+            (sg.gate === "none" ? "ゲートなし" : `${sg.gate}ゲート 閾値${sg.erThreshold}`) +
+            ") → " +
             (sg.direction ? "発火 " + sg.direction : "発火なし")
         );
       }
