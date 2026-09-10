@@ -13,13 +13,14 @@
 const SC = globalThis.SignalCore;
 const {
   PAIRS,
+  ALL_PAIRS,
   dowOf,
   fetchRawDailyValuesAuto,
   processDailyBars,
   computeATR14,
   computeDailySignal,
   computeAvgER,
-  computeUsdOutsideSignal,
+  computeAllSatellites,
   lastCompleteBarIsMonday,
   aggregateWeekly,
   officialWeeks,
@@ -158,23 +159,29 @@ async function runCheck(env, opts) {
   // 汚染対策 2026-08-18)の2系列を派生させる。
   const rawBySymbol = {};
   const sourceBySymbol = {}; // "FT5" or "TwelveData"
-  for (const pair of PAIRS) {
+  const dropFormingBySymbol = {}; // Twelve Data経路のみ形成中バーの除外が必要
+  for (const pair of ALL_PAIRS) {
     try {
       const fetched = await fetchRawDailyValuesAuto(pair.symbol, env.TWELVE_DATA_API_KEY);
       rawBySymbol[pair.symbol] = fetched.raw;
       sourceBySymbol[pair.symbol] = fetched.source;
+      dropFormingBySymbol[pair.symbol] = fetched.dropForming;
       log.push(`${pair.label} data: ${fetched.note}`);
       anyOk = true;
     } catch (e) {
       log.push(`${pair.label} error: ${e.message}`);
     }
   }
-  const barsBySymbol = {};       // 日足RideThin・ER(日曜足あり)
-  const weeklySrcBySymbol = {};  // 週足ドンチャン(日曜足なし)
-  for (const pair of PAIRS) {
+  // 2026-09-10: ブローカー時間(NY17:00)では土日ラベルのバーが存在しないため、
+  // 旧版の2系列(日曜足あり/なし)の作り分けは不要。単一系列で日足・週足・ERを賄う。
+  const barsBySymbol = {};
+  const weeklySrcBySymbol = {};
+  for (const pair of ALL_PAIRS) {
     if (!rawBySymbol[pair.symbol]) continue;
-    barsBySymbol[pair.symbol] = processDailyBars(rawBySymbol[pair.symbol], { keepSunday: true });
-    weeklySrcBySymbol[pair.symbol] = processDailyBars(rawBySymbol[pair.symbol], { keepSunday: false });
+    const bars = processDailyBars(rawBySymbol[pair.symbol],
+      { dropForming: !!dropFormingBySymbol[pair.symbol] });
+    barsBySymbol[pair.symbol] = bars;
+    weeklySrcBySymbol[pair.symbol] = bars;
   }
   for (const pair of PAIRS) {
     const bars = barsBySymbol[pair.symbol];
@@ -184,33 +191,41 @@ async function runCheck(env, opts) {
     lines.push(...r.lines);
   }
 
-  // 分散レイヤー: USDJPYアウトサイドデイ継続(3ペア平均ER > 0.16 のときだけ)。
-  // 日足RideThinと同じ日曜足ありの系列で判定。
-  if (barsBySymbol["USD/JPY"]) {
-    try {
-      const erAll = computeAvgER(barsBySymbol, 20);
-      const uo = computeUsdOutsideSignal(barsBySymbol["USD/JPY"], erAll);
-      if (uo && uo.direction) {
+  // 分散レイヤー9層(2026-09-10、balanced対応)。
+  // ERゲートはコア3ペア平均。AUDJPY/EURJPY上の層はFT5の処理順の都合で
+  // 前日のERを見るため、erPrev を別に渡す(signal-core.js の erLagForPair 参照)。
+  try {
+    const er = computeAvgER(barsBySymbol, 20, 0);
+    const erPrev = computeAvgER(barsBySymbol, 20, 1);
+    const usdWeeks = officialWeeks(aggregateWeekly(barsBySymbol["USD/JPY"] || []));
+    const newWeek = lastCompleteBarIsMonday(barsBySymbol["USD/JPY"] || []);
+    const sats = computeAllSatellites(
+      barsBySymbol, er, erPrev, { "USD/JPY": usdWeeks }, newWeek);
+    for (const sg of sats) {
+      if (sg.direction) {
+        const rName = sg.weekly ? "週足ATR14" : "ATR14";
+        const timeout = sg.weekly ? `保有${sg.holdWeeks}週` : `保有${sg.holdDays}営業日`;
         lines.push(
-          `USDJPY アウトサイドデイ継続 ${dirLabel(uo.direction)}` +
-            ` [ATR14=${fmtPrice(uo.atr14, "USD/JPY")} avgER=${uo.avgER.toFixed(3)}>${uo.erThreshold}` +
-            ` 逆指値≈${uo.stopMult}R 保有${uo.holdDays}営業日]`
+          `${sg.pair} ${sg.title} ${dirLabel(sg.direction)}` +
+            ` [${rName}=${fmtPrice(sg.atr14, sg.symbol)}` +
+            (sg.avgER != null ? ` avgER=${sg.avgER.toFixed(3)}` : "") +
+            ` 逆指値≈${sg.stopMult}R ${timeout}]`
         );
       }
-      // シグナルの有無にかかわらず判定根拠を log に残す(このコードが走ったことの確認にもなる)
-      if (uo && uo.insufficientData) {
-        log.push("USDOutside: 日足不足で判定不可");
-      } else if (uo) {
-        const aer = uo.avgER != null ? uo.avgER.toFixed(3) : "n/a";
+      // シグナルの有無にかかわらず判定根拠を log に残す(このコードが走った確認にもなる)
+      if (sg.insufficientData) {
+        log.push(`${sg.label}: バー不足で判定不可`);
+      } else {
+        const aer = sg.avgER != null ? sg.avgER.toFixed(3) : "n/a";
         log.push(
-          `USDOutside: 前日=${uo.prevBar ? uo.prevBar.date : "?"} ` +
-            `outside=${uo.outside} dir=${uo.rawDirection} ` +
-            `avgER=${aer}(閾値${uo.erThreshold}) → ${uo.direction ? "発火 " + uo.direction : "発火なし"}`
+          `${sg.label}: 基準=${sg.referenceDate || sg.referenceWeek || "?"} ` +
+            `dir=${sg.rawDirection} avgER=${aer}(${sg.gate}ゲート 閾値${sg.erThreshold}) → ` +
+            (sg.direction ? "発火 " + sg.direction : "発火なし")
         );
       }
-    } catch (e) {
-      log.push(`USDOutside error: ${e.message}`);
     }
+  } catch (e) {
+    log.push(`satellites error: ${e.message}`);
   }
 
   let sent = null;

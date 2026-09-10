@@ -12,10 +12,11 @@
 // 関数・定数を取り出すだけにし、二重実装によるロジックのズレを防ぐ。
 const {
   PAIRS,
-  USD_OUTSIDE,
+  ALL_PAIRS,
+  SATELLITES,
   weekKeyOf,
   todayStr,
-  isBeforeDailyClose,
+  nextBarCloseJst,
   dowOf,
   addTradingDays,
   fetchRawDailyValuesAuto,
@@ -23,7 +24,7 @@ const {
   computeATR14,
   computeDailySignal,
   computeAvgER,
-  computeUsdOutsideSignal,
+  computeAllSatellites,
   lastCompleteBarIsMonday,
   aggregateWeekly,
   officialWeeks,
@@ -34,22 +35,27 @@ const {
 // ========== 設定値(EAの実装に合わせた固定値) ==========
 
 // 日足RideThin(Ride15配分)。targetR=nullは目標なし(ride、反対ブレイクのみ+ハードストップ)。
+// balanced(2026-09-10): rideトランシェに DailyRideLotMult=0.5 が掛かる。
+// EAは RoundLot(0.10*0.15)=0.02 → RoundLot(0.02*0.5)=0.01 → 0.01で床止め。
+// この結果 ride は通常時も縮小時も 0.01 に丸まり、rideサーキットブレーカーは
+// 現構成では損益に影響しない(実機ログで7,121件すべて0.01を確認済み)。
 const DAILY_TRANCHES = [
   { name: "T0", weight: 0.20, targetR: 0.1 },
   { name: "T1", weight: 0.20, targetR: 0.2 },
   { name: "T2", weight: 0.25, targetR: 0.3 },
   { name: "T3", weight: 0.20, targetR: 0.5 },
-  { name: "ride", weight: 0.15, targetR: null, hardStopR: -1.0 },
+  { name: "ride", weight: 0.15, targetR: null, hardStopR: -1.0,
+    lotMult: 0.5, floorLot: 0.01 },
 ];
 
 // 週足ドンチャン(3階層)。Rはブレイク幅そのもの(ATRではない)。rideにハードストップなし(教訓34)。
-// WDLite(2026-08-31): DD削減のため各トランシェのロットを縮小。
+// balanced(2026-09-10): WDT01LotMult=0.334 / WDRideLotMult=0.167。
 // EAは tierLot = RoundLot(WDLotSize/3) = RoundLot(0.10/3) = 0.03 を作り、
-// T0/T1 に ×0.667(→0.02)、ride に ×0.333(→0.01)を掛けて再度丸める2段階。lotMult がその倍率。
+// T0/T1 に ×0.334(→0.01)、ride に ×0.167(→0.01)を掛けて再度丸め、0.01で床止め。
 const WEEKLY_TRANCHES = [
-  { name: "T0", weight: 1 / 3, targetR: 0.5, lotMult: 0.667 },
-  { name: "T1", weight: 1 / 3, targetR: 1.0, lotMult: 0.667 },
-  { name: "ride", weight: 1 / 3, targetR: null, lotMult: 0.333 },
+  { name: "T0", weight: 1 / 3, targetR: 0.5, lotMult: 0.334, floorLot: 0.01 },
+  { name: "T1", weight: 1 / 3, targetR: 1.0, lotMult: 0.334, floorLot: 0.01 },
+  { name: "ride", weight: 1 / 3, targetR: null, lotMult: 0.167, floorLot: 0.01 },
 ];
 
 const BASE_LOT_DAILY = 0.10;   // バックテスト基準ロット(1ペアあたり)
@@ -127,12 +133,15 @@ function tranchesWithLots(tranches, baseLot, scale) {
   return tranches.map((t) => {
     let lot;
     if (t.lotMult != null) {
-      // EA(WDLite)互換: tierLot = RoundLot(baseLot * weight) を作ってから lotMult を掛けて再度丸める2段階。
-      const tierLot = roundLot(baseLot * t.weight);
-      lot = roundLot(tierLot * t.lotMult * scale);
+      // EA互換の2段階: tierLot = RoundLot(baseLot*weight) を作ってから
+      // lotMult を掛けて再度丸める。EAは最後に0.01で床止めする
+      // (これが無いと多重適用で0.00になり発注が失敗する。教訓48の失敗パターン)。
+      const tierLot = roundLot(baseLot * t.weight * scale);
+      lot = roundLot(tierLot * t.lotMult);
     } else {
       lot = roundLot(baseLot * t.weight * scale);
     }
+    if (t.floorLot != null && lot < t.floorLot) lot = t.floorLot;
     return { ...t, lot };
   });
 }
@@ -394,35 +403,91 @@ function sundayNote(dsig, dataSourceNote) {
 
 // USDJPYアウトサイドデイ継続レイヤーの表示ブロック。シグナルの有無にかかわらず
 // 判定根拠(アウトサイドデイ成否・ER・ゲート状態)を必ず出す。
-function renderUsdOutsideBlock(sig, symbol) {
+// 衛星9層の共通描画。メカニズムごとに「判定根拠」と「出ていない理由」を出し分ける。
+function satelliteEvidence(sig, symbol) {
+  const p = (v) => fmtPrice(v, symbol);
+  const b1 = sig.prevBar, b2 = sig.prevPrevBar;
+  const body = b1
+    ? (b1.close > b1.open ? "陽線" : b1.close < b1.open ? "陰線" : "同値")
+    : "";
+
+  if (sig.kind === "outside_cont" || sig.kind === "outside_fade") {
+    return `前々日 高${p(b2.high)}/安${p(b2.low)} → 前日 高${p(b1.high)}/安${p(b1.low)}
+      (${b1.date}、${body}) / アウトサイドデイ: ${sig.outside ? "○(高安とも更新)" : "×"}`;
+  }
+  if (sig.kind === "streak_rev") {
+    return `直近${sig.streakN}日: ${sig.allUp ? "全て陽線 → フェードでショート" :
+      sig.allDown ? "全て陰線 → フェードでロング" : "連続していない"}
+      (前日 ${b1.date}、${body})`;
+  }
+  if (sig.kind === "range_fade") {
+    return `直近レンジ 高${p(sig.rollHigh)}/安${p(sig.rollLow)} に対し
+      前日 高${p(b1.high)}/安${p(b1.low)}/終${p(b1.close)}(${b1.date}) /
+      失敗ブレイク: ${sig.failedUp ? "上抜け失敗 → ショート" :
+        sig.failedDown ? "下抜け失敗 → ロング" : "なし"}`;
+  }
+  if (sig.kind === "day2_fail") {
+    const d1 = sig.day1Up ? "上抜け" : sig.day1Down ? "下抜け" : "なし";
+    return `前々日(${b2.date})が直近レンジ 高${p(sig.rollHigh)}/安${p(sig.rollLow)} を
+      終値${p(b2.close)}で確定ブレイク: ${d1} /
+      前日(${b1.date})が極値${sig.day1Extreme != null ? p(sig.day1Extreme) : "-"}を
+      ${sig.extended ? "更新した(伸びた → 見送り)" : "更新できなかった(伸び悩み → フェード)"}`;
+  }
+  if (sig.kind === "weekly_streak_rev") {
+    return `直近${sig.streakN}週: ${sig.allUp ? "全て陽線 → フェードでショート" :
+      sig.allDown ? "全て陰線 → フェードでロング" : "連続していない"}
+      (直近確定週 ${sig.referenceWeek}) / 新しい週の確定: ${sig.newWeek ? "○" : "×(判定日ではない)"}`;
+  }
+  return "";
+}
+
+function satelliteNoSignalReason(sig) {
+  if (!sig.rawDirection) {
+    if (sig.kind === "outside_cont" || sig.kind === "outside_fade") {
+      return sig.outside ? "前日の実体がない(始値=終値)" : "前日がアウトサイドデイではない";
+    }
+    if (sig.kind === "streak_rev") return `直近${sig.streakN}日が同じ向きに連続していない`;
+    if (sig.kind === "weekly_streak_rev") return `直近${sig.streakN}週が同じ向きに連続していない`;
+    if (sig.kind === "range_fade") return "失敗ブレイクが成立していない";
+    if (sig.kind === "day2_fail") return "day-1の確定ブレイク or day-2の伸び悩みが成立していない";
+    return "条件が成立していない";
+  }
+  if (sig.weekly && !sig.newWeek) return "新しい週の確定日ではない(EAは週の変わり目だけ新規判定する)";
+  if (!sig.gateOpen) {
+    if (!sig.gateReady) return "効率比を算出できない(確定日足が不足)";
+    return sig.gate === "high"
+      ? "効率比が閾値以下(もみ合い)でゲート閉"
+      : "効率比が閾値超(トレンド)でゲート閉";
+  }
+  return "ATRを算出できない";
+}
+
+function renderSatelliteBlock(sig, symbol) {
   let h = `<div class="pair-meta" style="margin-top:10px;">
-    <span class="badge none">分散レイヤー: アウトサイドデイ継続(USDJPY)</span></div>`;
+    <span class="badge none">分散レイヤー: ${sig.title}(${sig.label})</span></div>`;
 
   if (sig.insufficientData) {
-    h += `<div class="pair-meta">データ不足(確定日足が足りません)</div>`;
+    h += `<div class="pair-meta">データ不足(確定バーが足りません)</div>`;
     return h;
   }
 
-  const gateTxt = !sig.gateReady
-    ? "ER算出に必要な確定日足(21本)が不足"
-    : `avgER=${sig.avgER.toFixed(3)}(閾値 ${sig.erThreshold} ${sig.gateOpen ? "超 → ゲート開" : "以下 → ゲート閉"})`;
-  h += `<div class="pair-meta">効率比ゲート(3ペア平均、高ERで有効): ${gateTxt}
-    ${sig.perPairER ? `<span class="section-note">[GBPJPY ${sig.perPairER.GBPJPY.toFixed(3)} / GBPUSD ${sig.perPairER.GBPUSD.toFixed(3)} / USDJPY ${sig.perPairER.USDJPY.toFixed(3)}]</span>` : ""}
-  </div>`;
-  h += `<div class="pair-meta">
-    判定根拠: 前々日 高${fmtPrice(sig.prevPrevBar.high, symbol)}/安${fmtPrice(sig.prevPrevBar.low, symbol)}
-    → 前日 高${fmtPrice(sig.prevBar.high, symbol)}/安${fmtPrice(sig.prevBar.low, symbol)}(${sig.prevBar.date}、
-    ${sig.prevBar.close > sig.prevBar.open ? "陽線" : sig.prevBar.close < sig.prevBar.open ? "陰線" : "同値"}) /
-    アウトサイドデイ: ${sig.outside ? "○(高安とも更新)" : `×(高値更新 ${sig.brokeHigh ? "○" : "×"} / 安値更新 ${sig.brokeLow ? "○" : "×"})`}
-  </div>`;
+  if (sig.gate === "none") {
+    h += `<div class="pair-meta">効率比ゲート: なし(この層は常時有効)</div>`;
+  } else {
+    const dir = sig.gate === "high" ? "高ERで有効" : "低ERで有効";
+    const gateTxt = !sig.gateReady
+      ? "ER算出に必要な確定日足(21本)が不足"
+      : `avgER=${sig.avgER.toFixed(3)}(閾値 ${sig.erThreshold} ${sig.gateOpen ? "→ ゲート開" : "→ ゲート閉"})`;
+    const lagNote = sig.pair < "GBPJPY"
+      ? '<span class="section-note">[このペアはFT5の処理順がERペアより前なので前日のERを見る]</span>'
+      : "";
+    h += `<div class="pair-meta">効率比ゲート(3ペア平均、${dir}): ${gateTxt} ${lagNote}</div>`;
+  }
+
+  h += `<div class="pair-meta">判定根拠: ${satelliteEvidence(sig, symbol)}</div>`;
 
   if (!sig.direction) {
-    let reason;
-    if (!sig.outside) reason = "前日がアウトサイドデイではない";
-    else if (!sig.rawDirection) reason = "前日の実体がない(始値=終値)";
-    else if (!sig.gateOpen) reason = sig.gateReady ? "効率比が閾値以下(もみ合い)でゲート閉" : "効率比を算出できない";
-    else reason = "ATR14を算出できない";
-    h += `<div class="pair-meta"><span class="badge none">本日シグナルなし</span> — ${reason}</div>`;
+    h += `<div class="pair-meta"><span class="badge none">本日シグナルなし</span> — ${satelliteNoSignalReason(sig)}</div>`;
     return h;
   }
 
@@ -430,13 +495,14 @@ function renderUsdOutsideBlock(sig, symbol) {
   const lot = roundLot(sig.lot * scale);
   const stopPips = fmtPips(sig.atr14 * sig.stopMult, symbol);
   const badge = sig.direction === "long" ? "long" : "short";
-  const alreadyOpen = hasOpenSatellite("usd-outside");
+  const alreadyOpen = hasOpenSatellite(sig.layer);
+  const rName = sig.weekly ? "週足ATR14" : "ATR14";
+  const timeout = sig.weekly ? `${sig.holdWeeks}週で手仕舞い` : `${sig.holdDays}営業日で手仕舞い`;
   h += `
     <div class="pair-meta">
-      <span class="badge ${badge}">継続 ${sig.direction === "long" ? "ロング" : "ショート"}</span>
-      ${sig.prevBar.close > sig.prevBar.open ? "前日陽線 → 順張り買い" : "前日陰線 → 順張り売り"}
+      <span class="badge ${badge}">${sig.direction === "long" ? "ロング" : "ショート"}</span>
       ${alreadyOpen ? '<span class="badge warn">既に保有中(EAは1本しか持たない)</span>' : ""}
-      ATR14=${fmtPrice(sig.atr14, symbol)}(R)
+      ${rName}=${fmtPrice(sig.atr14, symbol)}(R)
     </div>
     <table class="tranche-table">
       <thead><tr><th>枚数</th><th>利食い</th><th>逆指値(固定)</th><th>時間切れ</th></tr></thead>
@@ -444,19 +510,19 @@ function renderUsdOutsideBlock(sig, symbol) {
         <tr>
           <td>${fmtMai(lot)}枚</td>
           <td>なし(目標なし)</td>
-          <td>約定 ${sig.direction === "long" ? "−" : "+"} ${stopPips}pips(${sig.stopMult}×ATR14、トレールなし)</td>
-          <td>${sig.holdDays}営業日で手仕舞い</td>
+          <td>約定 ${sig.direction === "long" ? "−" : "+"} ${stopPips}pips(${sig.stopMult}×${rName}、トレールなし)</td>
+          <td>${timeout}</td>
         </tr>
       </tbody>
     </table>
     ${
       alreadyOpen
-        ? `<p class="section-note">USDOutside レイヤーの建玉を既に保有中です。EA(RB12tuned)はこのレイヤーの
+        ? `<p class="section-note">${sig.label} レイヤーの建玉を既に保有中です。EAはこのレイヤーの
            建玉スロットを1つしか持たず、埋まっている間は方向を問わず新規を取りません。ここで記録しないでください。</p>`
         : `<p class="section-note">今日の始値でエントリー後、実際の約定価格を記録してください
            (固定逆指値と手仕舞い予定日が計算されます)。</p>
            <button class="btn btn-primary btn-small record-entry" data-symbol="${sig.symbol}" data-label="${sig.label}"
-             data-timeframe="daily" data-direction="${sig.direction}" data-layer="usd-outside">
+             data-timeframe="daily" data-direction="${sig.direction}" data-layer="${sig.layer}">
              このシグナルを記録
            </button>`
     }
@@ -628,13 +694,28 @@ function renderSignals(results) {
       html += renderWeeklyPreview(r.weekly.previewSignal, r.symbol);
     }
 
-    // --- 分散レイヤー: USDJPYアウトサイドデイ継続(USD/JPYのカードにだけ表示) ---
-    if (r.usdOutside) {
-      html += renderUsdOutsideBlock(r.usdOutside, r.symbol);
-    }
 
     card.innerHTML = html;
     container.appendChild(card);
+  }
+
+  // --- 分散レイヤー9層(ペアごとにまとめて1枚のカードにする) ---
+  // AUDJPY・EURJPY はコアのペアカードを持たないため、コアとは別セクションに出す。
+  const sats = state.satellites || [];
+  if (sats.length) {
+    const byPair = {};
+    for (const sig of sats) (byPair[sig.symbol] = byPair[sig.symbol] || []).push(sig);
+    for (const symbol of Object.keys(byPair)) {
+      const card = document.createElement("div");
+      card.className = "card";
+      const label = (byPair[symbol][0] || {}).pair || symbol;
+      const fired = byPair[symbol].filter((x) => x.direction).length;
+      let html = `<h2>${label} <span class="section-note">分散レイヤー ${byPair[symbol].length}層`
+        + `${fired ? ` / 本日シグナル ${fired}件` : ""}</span></h2>`;
+      for (const sig of byPair[symbol]) html += renderSatelliteBlock(sig, symbol);
+      card.innerHTML = html;
+      container.appendChild(card);
+    }
   }
 
   container.querySelectorAll(".record-entry").forEach((btn) => {
@@ -1324,12 +1405,12 @@ function confirmEntry() {
   }
   const scale = lotScaleFactor(state.settings);
 
-  // 分散レイヤー: USDJPYアウトサイドデイ継続。コアとは建玉の形が違うので専用処理。
-  if (pendingEntry.layer === "usd-outside") {
-    const usd = state.lastResults && state.lastResults.find((r) => r.symbol === "USD/JPY");
-    const sig = usd && usd.usdOutside;
+  // 分散レイヤー9層。コアとは建玉の形(単一ポジション・目標なし・固定逆指値)が
+  // 違うので専用処理。pendingEntry.layer にレイヤーID(SATELLITES[].id)が入る。
+  if (pendingEntry.layer) {
+    const sig = (state.satellites || []).find((x) => x.layer === pendingEntry.layer);
     if (!sig || !sig.direction) {
-      alert("USDJPYアウトサイドデイのシグナル情報が見つかりません。『本日の判定を取得』をやり直してください。");
+      alert("そのレイヤーのシグナル情報が見つかりません。『本日の判定を取得』をやり直してください。");
       return;
     }
     state.positions.push(buildSatelliteRecord(sig, price, scale));
@@ -1407,22 +1488,29 @@ async function fetchAndRender() {
 
   const results = [];
   const freshBySymbol = {};
-  const rawBySymbol = {}; // 生日足(1シンボル1取得)。ここから2系列を派生させる。
+  const rawBySymbol = {}; // 生日足(1シンボル1取得)
+  const dropFormingBySymbol = {};
   const sourceNotes = []; // どのペアがFT5/Twelve Dataどちらから来たかの一覧(取得ステータス表示用)
+  const barsBySymbol = {}; // 衛星9層・ERゲート用(コア3 + AUDJPY/EURJPY)
   try {
-    for (const p of PAIRS) {
+    // 1) データ取得は5ペア(コア3 + 衛星専用のAUDJPY/EURJPY)
+    for (const p of ALL_PAIRS) {
       const fetched = await fetchRawDailyValuesAuto(p.symbol, s.apiKey);
       rawBySymbol[p.symbol] = fetched.raw;
+      dropFormingBySymbol[p.symbol] = fetched.dropForming;
       sourceNotes.push(`${p.label}: ${fetched.note}`);
-      // 【2026-09-05修正】日足RideThinはEAのD1系列(日曜の立ち上がり数時間も独立した
-      // 1本のバーとして持つ)に合わせて keepSunday:true で判定する。紙トレード照合で
-      // 日曜足を破棄すると N=1 ブレイクの前日/前々日比較が週境界で1コマずれ、EAの実際の
-      // エントリーとの一致率が66%まで落ちることが判明(修正後は99%超)。ATR14・ERゲート
-      // (USDOutside等)もこの系列を使う(EAも同じ日足系列から計算しているため)。
-      // 週足ドンチャンの集計・撤退ライン表示は従来通り日曜足を破棄した系列のまま
-      // (Twelve Dataの日曜早朝スパイクが週足撤退ラインを汚す問題への対策、2026-08-18)。
-      const bars = processDailyBars(rawBySymbol[p.symbol], { keepSunday: true });
-      const weeklySourceBars = processDailyBars(rawBySymbol[p.symbol], { keepSunday: false });
+      barsBySymbol[p.symbol] = processDailyBars(fetched.raw, { dropForming: fetched.dropForming });
+    }
+    // 2) コア(日足RideThin・週足ドンチャン)の解析は3ペアだけ
+    for (const p of PAIRS) {
+      // 【2026-09-10、ブローカー時間へ移行】日足の区切りがNY17:00になり、
+      // 日曜の立ち上がり足は月曜に吸収されて土日ラベルのバーが存在しなくなった
+      // (FT5のD1キャッシュで実測: 月〜金のみ)。このため旧版の「コア用(日曜足
+      // 破棄)/USDOutside用(日曜足あり)」という2系列の作り分けは不要になり、
+      // 単一の系列でコア日足・週足集計・ERゲートすべてを賄う。
+      // FT5経路のバーは確定済みなので形成中バーの除外も不要(fetched.dropForming)。
+      const bars = barsBySymbol[p.symbol];
+      const weeklySourceBars = bars;
       const atr14 = computeATR14(bars);
       const dailySignal = computeDailySignal(bars);
       const allWeeklyBars = aggregateWeekly(weeklySourceBars);
@@ -1441,7 +1529,7 @@ async function fetchAndRender() {
         daily: { bars, atr14, signal: dailySignal },
         weekly: { bars: weeklyBars, signal: weeklySignal, previewSignal },
         weeklySourceBars, // weeklyBreakdown(日別内訳の診断表示)用。週足H/Lの計算根拠と同じ系列。
-        dataSourceNote: fetched.note, // FT5/Twelve Data どちらから取得したか(教訓、2026-09-06)
+        dataSourceNote: sourceNotes.find((n) => n.startsWith(p.label + ":")) || "",
       };
       results.push(r);
       freshBySymbol[p.symbol] = r;
@@ -1461,24 +1549,27 @@ async function fetchAndRender() {
     // 分散レイヤー: USDJPYアウトサイドデイ継続。ERゲートはコアと同じ日足系列
     // (日曜足を残した3ペア日足)から計算する(EAも RunDailySignals 内の同じ系列で
     // erValue[p] を更新しているため)。
-    const barsForER = {};
-    for (const p of PAIRS) barsForER[p.symbol] = freshBySymbol[p.symbol].daily.bars;
-    const er = computeAvgER(barsForER, 20);
+    const er = computeAvgER(barsBySymbol, 20, 0);       // ERペア上の層が見る現在のER
+    const erPrev = computeAvgER(barsBySymbol, 20, 1);   // AUDJPY/EURJPY上の層が見る前日のER
     state.avgER = er;
-    const usdResult = results.find((x) => x.symbol === "USD/JPY");
-    if (usdResult) usdResult.usdOutside = computeUsdOutsideSignal(barsForER["USD/JPY"], er);
+    // 週足ストリーク(USDWeeklyStreak)用の確定週足と、新しい週の確定判定
+    const usdWeeks = officialWeeks(aggregateWeekly(barsBySymbol["USD/JPY"] || []));
+    const newWeek = lastCompleteBarIsMonday(barsBySymbol["USD/JPY"] || []);
+    state.satellites = computeAllSatellites(
+      barsBySymbol, er, erPrev, { "USD/JPY": usdWeeks }, newWeek);
 
     state.lastFetch = freshBySymbol;
     state.lastResults = results;
     renderSignals(results);
     renderPositions(freshBySymbol);
-    // 日足の区切りは毎朝9:00 JST。それより前は直近バーがまだ確定していないため、
-    // ここで表示している判定・撤退ラインは「1本前の確定バーまで」の状態であり、
-    // EAが本日の新規建てを判断する時点(朝9:00)の状態とは異なる。
-    const preClose = isBeforeDailyClose();
-    statusEl.textContent = `取得完了(${new Date().toLocaleString("ja-JP")}) — ${sourceNotes.join(" / ")}`;
+    // ブローカー時間(NY17:00 = 日本時間 夏6:00 / 冬7:00)が日足の切り替わり。
+    // FT5エクスポートのバーは常に確定済みなので「形成中バーを完成扱いする」
+    // 旧バグの余地は無い。代わりに、次の確定時刻を案内として出す。
+    statusEl.textContent =
+      `取得完了(${new Date().toLocaleString("ja-JP")}) — 次の日足確定 ${nextBarCloseJst()} JST — ` +
+      sourceNotes.join(" / ");
     const warnEl = document.getElementById("preCloseWarn");
-    if (warnEl) warnEl.classList.toggle("hidden", !preClose);
+    if (warnEl) warnEl.classList.add("hidden");
   } catch (e) {
     statusEl.textContent = `エラー: ${e.message}`;
     statusEl.classList.add("error");

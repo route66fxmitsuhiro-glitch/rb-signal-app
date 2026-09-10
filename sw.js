@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v31"; // v31: 日足の確定は毎朝9:00 JST。朝9:00前に形成中のバーを完成扱いしていたバグを修正(撤退ラインが約13pipsタイトになる実害あり)+朝9:00前の警告表示を追加
+const CACHE_NAME = "rb-signal-shell-v33"; // v33: balanced対応。衛星9層(実機ログと95.9%一致)・コアのロット倍率(日足ride×0.5/週足T01×0.334/ride×0.167)・5ペア取得
 const SHELL_FILES = [
   "./",
   "./index.html",
