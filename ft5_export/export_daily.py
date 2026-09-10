@@ -97,6 +97,46 @@ def parse_bars_dat_tail(path, max_records):
     return df[date_ole > 0].reset_index(drop=True)
 
 
+def drop_forming_bars(df, code):
+    """形成中(未確定)の日足を落とす。
+
+    FT5のD1キャッシュは**まだ完成していないバーも含む**。実測(2026-09-10)では
+    最終バーが分足175本(通常1,436本)しかない状態でエクスポートされ、
+    アプリ・通知がその未確定バーを「前日」として判定していた。
+    2026-09-07に朝9:00区切りで踏んだのと同じ罠。
+
+    D1のラベルは Testing/<SYM>/1/Bars.dat の分足の暦日と一致するので、
+    日ごとの分足数を数え、中央値の60%未満の日を未確定として落とす。
+    分足ファイルが無い場合は落とさず警告だけ返す(判断材料が無いため)。
+    """
+    mpath = os.path.join(FT5_TESTING, code, "1", "Bars.dat")
+    if not os.path.exists(mpath):
+        return df, f"{code}: 分足が見つからず未確定バーの判定ができません"
+    m = parse_bars_dat_tail(mpath, 60000)
+    if m.empty:
+        return df, f"{code}: 分足が空で未確定バーの判定ができません"
+    counts = m.groupby(m["datetime"].dt.date).size()
+    if len(counts) < 5:
+        return df, None
+    med = counts.median()
+    thin = {str(d) for d, c in counts.items() if c < med * 0.6}
+    if not thin:
+        return df, None
+    # **末尾から連続する分だけ**落とす。途中の薄い日(祝日など。実測では
+    # 2026-08-24・08-31 のような月曜)は取引が少ないだけの正当な確定バーで、
+    # これを抜くと日足の連続性が壊れ N=1 ブレイクの前日/前々日比較がずれる。
+    dates = df["datetime"].dt.date.astype(str).tolist()
+    cut = len(dates)
+    while cut > 0 and dates[cut - 1] in thin:
+        cut -= 1
+    if cut == len(dates):
+        return df, None
+    dropped = dates[cut:]
+    note = (f"{code}: 末尾の未確定バーを{len(dropped)}本除外 {dropped} "
+            f"(分足が中央値{med:.0f}本の60%未満)")
+    return df.iloc[:cut], note
+
+
 def check_broker_boundary(df, symbol):
     """直近1年に土日ラベルの日足が無いことを確認する。
 
@@ -138,6 +178,9 @@ def main():
             errors.append(err)
             print(f"  ! {err}")
             continue
+        df, drop_note = drop_forming_bars(df, code)
+        if drop_note:
+            print(f"  {drop_note}")
         tail = df.tail(EXPORT_BARS)
         out["pairs"][symbol] = [
             {"date": r["datetime"].date().isoformat(),
