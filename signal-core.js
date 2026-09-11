@@ -75,6 +75,39 @@
       gate: "low", erThreshold: 0.229, stopMult: 1.0, holdDays: 5, lot: 0.18 },
   ];
 
+  // ========== 衝突ゲート(RB_Broker_Conflict.dll の確定パラメータ、2026-09-11) ==========
+  // EAの ConflictLotMult(sym, newSide) と同じ考え方。同一シンボル(cfg.pair)上で
+  // 既に建玉中の「他の」衛星レイヤーの方向を見て、新規衛星の発注ロットだけを
+  // 調整する(シグナルの成立自体・決済ロジックには一切影響しない)。
+  //   mode: 0=無効(常に1.0倍、balancedと完全一致) / 1=衛星どうしのみ考慮
+  //   (EAのConflictMode=2[コア込み]は予測段階で-4〜-16%と逆効果と判明し不採用、
+  //    このアプリにも実装しない)
+  // agree(全部同方向)/oppose(全部逆方向)/mixed(両方向混在)の3ケースで倍率を変える。
+  // 実機検証: Opp=0.35のとき balanced 比 Return/DD +17.42%(2026-09-11確定)。
+  const CONFLICT_GATE = { mode: 1, agreeMult: 1.00, oppMult: 0.35, mixedMult: 1.00 };
+
+  // pair: 対象シンボル(cfg.pair、例"GBPJPY") … このアプリでは実際には呼び出し側が
+  //       既に同一pairだけを渡すので未使用だが、EA側の関数シグネチャと対応を
+  //       明確にするため引数として残す。
+  // direction: 新規に建てようとしているシグナルの方向("long"/"short")
+  // openDirections: 同一pair上で現在保有中の「他の」衛星レイヤーの方向の配列
+  //       (例: ["long"] や ["long","short"]。自分自身のレイヤーは含めないこと)
+  function satelliteConflictMult(pair, direction, openDirections) {
+    if (CONFLICT_GATE.mode <= 0 || !direction || !openDirections || !openDirections.length) {
+      return 1.0;
+    }
+    let agree = 0;
+    let oppose = 0;
+    for (const d of openDirections) {
+      if (d === direction) agree++;
+      else oppose++;
+    }
+    if (agree > 0 && oppose > 0) return CONFLICT_GATE.mixedMult;
+    if (oppose > 0) return CONFLICT_GATE.oppMult;
+    if (agree > 0) return CONFLICT_GATE.agreeMult;
+    return 1.0;
+  }
+
   // ========== コアのロット倍率(RB_Broker balanced の確定値) ==========
   const CORE_LOTS = {
     lotSize: 0.10,          // LotSize(日足RideThin)
@@ -991,6 +1024,8 @@
     ALL_PAIRS,
     SATELLITES,
     CORE_LOTS,
+    CONFLICT_GATE,
+    satelliteConflictMult,
     ymd,
     weekKeyOf,
     todayStr,

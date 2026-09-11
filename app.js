@@ -3,7 +3,9 @@
  * RBシグナル(コア版)
  * 日足RideThin(5トランシェ)+週足ドンチャン(3階層)のシグナル判定・
  * ロット計算・保有トランシェの目標/撤退ライン管理を行う。
- * ride サーキットブレーカーと9つの分散レイヤーは未実装(フェーズ2)。
+ * 分散レイヤー9層(2026-09-04〜)・衝突ゲート(2026-09-11〜)を実装済み。
+ * rideサーキットブレーカーは未実装(現行ロット構成では日足/週足ともロット下限に
+ * 張り付いていて実質休眠中のため、優先度低)。
  */
 
 // ========== 共通ロジック(signal-core.js)からの読み込み ==========
@@ -35,6 +37,7 @@ const {
   computeDailySignal,
   computeAvgER,
   computeAllSatellites,
+  satelliteConflictMult,
   lastCompleteBarIsMonday,
   aggregateWeekly,
   officialWeeks,
@@ -105,7 +108,23 @@ function saveSettings(s) {
 function loadPositions() {
   const raw = localStorage.getItem(LS_POSITIONS);
   if (!raw) return [];
-  try { return JSON.parse(raw); } catch { return []; }
+  let list;
+  try { list = JSON.parse(raw); } catch { return []; }
+  // 2026-09-11より前に記録された分散レイヤーのポジションは、実際のレイヤーに
+  // 関わらず kind="usd-outside" 固定・isSatellite/pair/title が欠落していた
+  // (教訓、全9層が同一レイヤー扱いされていたバグ)。どの具体的なレイヤーだったかは
+  // 情報が失われ復元できないが、単一ユニット形状(fixedStopを持つ)を目印に
+  // 最小限の補完をして、表示や再エントリー抑止判定が壊れないようにする。
+  let migrated = false;
+  for (const p of list) {
+    if (p.fixedStop != null && !p.isSatellite) {
+      p.isSatellite = true;
+      if (!p.pair) p.pair = (p.symbol || "").replace("/", "");
+      migrated = true;
+    }
+  }
+  if (migrated) savePositions(list);
+  return list;
 }
 
 function savePositions(list) {
@@ -184,12 +203,42 @@ function buildPositionRecord(pairLabel, symbol, timeframe, direction, entryPrice
   };
 }
 
-// USDJPYアウトサイドデイ継続の建玉レコード。コアの5トランシェとは形が違う:
-// 単一ユニット・利食い目標なし・固定逆指値(トレールしない)・時間切れ手仕舞い。
-// 既存の renderPositions / orderCheckItems / close-toggle 配線をそのまま流用できる
-// よう、tranches は1要素(name:"unit")で表現しつつ kind で分岐する。
+// 同一シンボル(cfg.pair)上で現在保有中の「他の」衛星レイヤーの方向一覧を返す。
+// EAの ConflictLotMult() は同一ティック内で既存ハンドルの方向を直接見るが、
+// このアプリはEAの内部状態を持たないため、ユーザーが記録済みの未決済ポジション
+// (isSatellite=true のもの)で代用判定する。excludeLayer は今まさに判定中の
+// レイヤー自身(hasOpenSatellite()により通常は未保有のはずだが念のため除外)。
+function openSatelliteDirections(pair, excludeLayer) {
+  return state.positions
+    .filter(
+      (p) =>
+        p.isSatellite &&
+        p.pair === pair &&
+        p.kind !== excludeLayer &&
+        p.tranches.some((t) => !t.closed)
+    )
+    .map((p) => p.direction);
+}
+
+// 衝突ゲート(教訓、2026-09-11確定)適用後の実発注ロットを計算する。
+// シグナルのプレビュー(renderSatelliteBlock)と実際の記録(buildSatelliteRecord)が
+// 必ず同じ値を使うよう、ここに1箇所だけ実装する(教訓: 実装が2箇所に分散すると
+// 必ずどちらかが腐る)。
+function satelliteLot(sig, scale) {
+  const openDirs = openSatelliteDirections(sig.pair, sig.layer);
+  const mult = satelliteConflictMult(sig.pair, sig.direction, openDirs);
+  return { lot: roundLot(sig.lot * scale * mult), mult, openDirs };
+}
+
+// 分散レイヤー(衛星)9層共通の建玉レコード。コアの5トランシェ/週足3階層とは
+// 形が違う: 単一ユニット・利食い目標なし・固定逆指値(トレールしない)・
+// 時間切れ手仕舞い。既存の renderPositions / orderCheckItems / close-toggle
+// 配線をそのまま流用できるよう、tranches は1要素(name:"unit")で表現する。
+// isSatellite フラグでコアと区別し、kind にはレイヤーID(SATELLITES[].id、
+// 例"gbp-fade")を入れる(以前はここが "usd-outside" に固定されており、
+// 全9層が同一レイヤーとして扱われるバグがあった。2026-09-11修正)。
 function buildSatelliteRecord(sig, entryPrice, scale) {
-  const lot = roundLot(sig.lot * scale);
+  const { lot, mult, openDirs } = satelliteLot(sig, scale);
   const R = sig.atr14;
   const fixedStop =
     sig.direction === "long"
@@ -197,8 +246,11 @@ function buildSatelliteRecord(sig, entryPrice, scale) {
       : entryPrice + sig.stopMult * R;
   const entryDate = todayStr();
   return {
-    id: `${sig.symbol}-usdoutside-${Date.now()}`,
-    kind: "usd-outside",
+    id: `${sig.symbol}-${sig.layer}-${Date.now()}`,
+    kind: sig.layer,
+    isSatellite: true,
+    pair: sig.pair,
+    title: sig.title,
     pairLabel: sig.label,
     symbol: sig.symbol,
     timeframe: "daily",
@@ -209,6 +261,8 @@ function buildSatelliteRecord(sig, entryPrice, scale) {
     stopMult: sig.stopMult,
     holdDays: sig.holdDays,
     fixedStop,
+    conflictMult: mult,
+    conflictOpenDirections: openDirs.slice(),
     exitDate: addTradingDays(entryDate, sig.holdDays), // 時間切れ手仕舞い目安(平日カウント)
     tranches: [{ name: "unit", targetR: null, hardStopR: null, lot, closed: false }],
     exitOverride: null,
@@ -248,8 +302,9 @@ function weeklyBreakdown(weekBar, dailyBars, direction) {
 // 「反対ブレイクによる撤退ライン」を、そのポジションの時間軸に応じた最新の完成バーから計算し、
 // hardStopがあればより近い方(エントリーに近い方)を採用する。
 function currentExitLevel(pos, latestStopTrigger) {
-  // USDOutside は固定逆指値(約定 ∓ StopMult×ATR14)。トレールも反対ブレイクも使わない。
-  if (pos.kind === "usd-outside") {
+  // 分散レイヤー(衛星)は9層すべて固定逆指値(約定 ∓ StopMult×ATR14)。
+  // トレールも反対ブレイクも使わない。
+  if (pos.isSatellite) {
     return { price: pos.fixedStop, source: `固定逆指値(${pos.stopMult}R、トレールなし)` };
   }
   if (!latestStopTrigger) return { price: null, source: "データ不足" };
@@ -329,9 +384,10 @@ function fmtMai(lot) {
   return (lot * MAI_PER_LOT).toFixed(1);
 }
 
-// 保有カード等に出す時間軸ラベル。分散レイヤーはレイヤー名を返す。
+// 保有カード等に出す時間軸ラベル。分散レイヤーはメカニズム名を返す
+// (以前は全レイヤーが "アウトサイドデイ継続" 固定だった。2026-09-11修正)。
 function tfLabel(pos) {
-  if (pos.kind === "usd-outside") return "アウトサイドデイ継続";
+  if (pos.isSatellite) return pos.title || pos.pairLabel || "分散レイヤー";
   return pos.timeframe === "daily" ? "日足" : "週足";
 }
 
@@ -502,18 +558,25 @@ function renderSatelliteBlock(sig, symbol) {
   }
 
   const scale = lotScaleFactor(state.settings);
-  const lot = roundLot(sig.lot * scale);
+  const { lot, mult, openDirs } = satelliteLot(sig, scale);
   const stopPips = fmtPips(sig.atr14 * sig.stopMult, symbol);
   const badge = sig.direction === "long" ? "long" : "short";
   const alreadyOpen = hasOpenSatellite(sig.layer);
   const rName = sig.weekly ? "週足ATR14" : "ATR14";
   const timeout = sig.weekly ? `${sig.holdWeeks}週で手仕舞い` : `${sig.holdDays}営業日で手仕舞い`;
+  const conflictNote =
+    mult !== 1
+      ? `<div class="pair-meta section-note">衝突ゲート: 同一ペアの他レイヤーが${
+          openDirs.length > 1 && new Set(openDirs).size > 1 ? "混在方向に建玉中" : "逆方向に建玉中"
+        }のためロット×${mult.toFixed(2)}(下表に反映済み)</div>`
+      : "";
   h += `
     <div class="pair-meta">
       <span class="badge ${badge}">${sig.direction === "long" ? "ロング" : "ショート"}</span>
       ${alreadyOpen ? '<span class="badge warn">既に保有中(EAは1本しか持たない)</span>' : ""}
       ${rName}=${fmtPrice(sig.atr14, symbol)}(R)
     </div>
+    ${conflictNote}
     <table class="tranche-table">
       <thead><tr><th>枚数</th><th>利食い</th><th>逆指値(固定)</th><th>時間切れ</th></tr></thead>
       <tbody>
@@ -532,7 +595,7 @@ function renderSatelliteBlock(sig, symbol) {
         : `<p class="section-note">今日の始値でエントリー後、実際の約定価格を記録してください
            (固定逆指値と手仕舞い予定日が計算されます)。</p>
            <button class="btn btn-primary btn-small record-entry" data-symbol="${sig.symbol}" data-label="${sig.label}"
-             data-timeframe="daily" data-direction="${sig.direction}" data-layer="${sig.layer}">
+             data-timeframe="daily" data-direction="${sig.direction}" data-layer="${sig.layer}" data-title="${sig.title}">
              このシグナルを記録
            </button>`
     }
@@ -748,13 +811,21 @@ function renderSatelliteCard(pos) {
   const dueToday = today >= pos.exitDate;
   const overdue = today > pos.exitDate;
 
+  const mult = pos.conflictMult;
+  const conflictNote =
+    mult != null && mult !== 1
+      ? `<div class="pair-meta section-note">衝突ゲート適用: ロット×${mult.toFixed(2)}
+         (エントリー時点で同一ペアの他レイヤーが${pos.conflictOpenDirections && pos.conflictOpenDirections.length > 1 ? "混在方向" : "逆方向"}に建玉中)</div>`
+      : "";
+
   card.innerHTML = `
     <div class="pair-head">
       <span class="pair-name">${pos.pairLabel}</span>
-      <span class="badge ${badge}">アウトサイドデイ継続 ${pos.direction === "long" ? "ロング" : "ショート"}</span>
+      <span class="badge ${badge}">${pos.title || "分散レイヤー"} ${pos.direction === "long" ? "ロング" : "ショート"}</span>
       ${dueToday ? `<span class="badge warn">${overdue ? "手仕舞い予定日を経過" : "本日が手仕舞い予定日"}</span>` : ""}
     </div>
     <div class="pair-meta">エントリー ${pos.entryDate} @ ${fmtPrice(pos.entryPrice, pos.symbol)} / R(ATR14)=${fmtPrice(pos.R, pos.symbol)}</div>
+    ${conflictNote}
     <div class="pair-meta">
       逆指値(固定): <strong>${fmtPrice(exit.price, pos.symbol)}</strong>(${exit.source})
       <button class="btn btn-ghost btn-small edit-exit" data-pos="${pos.id}">編集</button>
@@ -795,8 +866,8 @@ function renderPositions(freshDataBySymbol) {
   empty.classList.toggle("hidden", openPositions.length > 0);
 
   for (const pos of openPositions) {
-    // 分散レイヤー(USDOutside 等)は形が違うので専用カードで描画する。
-    if (pos.kind === "usd-outside") {
+    // 分散レイヤー(衛星9層)はコアと形が違うので専用カードで描画する。
+    if (pos.isSatellite) {
       container.appendChild(renderSatelliteCard(pos));
       continue;
     }
@@ -949,7 +1020,7 @@ function satelliteOrderCheckItems(pos) {
     {
       key: "entry",
       checkable: true,
-      label: `USDJPY アウトサイドデイ継続: ${dir} を成行で 1 本 ${fmtMai(t.lot)}枚。約定 ≈ ${fmtPrice(pos.entryPrice, pos.symbol)}(スプレッド分ずれます)`,
+      label: `${pos.pairLabel} ${pos.title || "分散レイヤー"}: ${dir} を成行で 1 本 ${fmtMai(t.lot)}枚${pos.conflictMult != null && pos.conflictMult !== 1 ? `(衝突ゲート×${pos.conflictMult.toFixed(2)}適用済み)` : ""}。約定 ≈ ${fmtPrice(pos.entryPrice, pos.symbol)}(スプレッド分ずれます)`,
     },
     {
       key: "stop",
@@ -969,7 +1040,7 @@ function satelliteOrderCheckItems(pos) {
 
 // 1ポジションのチェック項目リスト。{ key, label, checkable } の配列を返す。
 function orderCheckItems(pos) {
-  if (pos.kind === "usd-outside") return satelliteOrderCheckItems(pos);
+  if (pos.isSatellite) return satelliteOrderCheckItems(pos);
   const exit = pos.exitOverride != null
     ? { price: pos.exitOverride, source: "手動設定" }
     : currentExitLevel(pos, latestStopTriggerFor(pos));
@@ -1390,12 +1461,11 @@ let pendingEntry = null;
 
 function openEntryModal(ds) {
   pendingEntry = ds;
-  const kindLabel =
-    ds.layer === "usd-outside"
-      ? "アウトサイドデイ継続"
-      : ds.timeframe === "daily"
-      ? "日足"
-      : "週足";
+  const kindLabel = ds.layer
+    ? ds.title || "分散レイヤー"
+    : ds.timeframe === "daily"
+    ? "日足"
+    : "週足";
   document.getElementById("entryModalTitle").textContent = `${ds.label} ${kindLabel} ${ds.direction === "long" ? "ロング" : "ショート"} — 約定価格を入力`;
   document.getElementById("entryPriceInput").value = "";
   document.getElementById("entryModal").classList.remove("hidden");
