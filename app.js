@@ -1599,12 +1599,14 @@ function appendShotBars(bars) {
 
 const RATE_SHOT_SCHEMA = {
   type: "object",
+  additionalProperties: false,
   properties: {
     pairs: {
       type: "array",
       description: "画面に写っている通貨ペアすべて",
       items: {
         type: "object",
+        additionalProperties: false,
         properties: {
           symbol: { type: "string", description: "GBP/JPY のようなスラッシュ区切りの表記" },
           bid: { type: "number", description: "BID欄の値。大きい数字と右肩の小さい数字を連結した完全な値" },

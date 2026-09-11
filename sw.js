@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v35"; // v35: 衝突ゲート(同一ペアの他衛星が逆方向のときロット×0.35)を追加。合わせて全9衛星が"usd-outside"に固定されていたポジション種別バグを修正(枚数計算は無傷、表示ラベルと再エントリー抑止判定のみ影響)
+const CACHE_NAME = "rb-signal-shell-v36"; // v36: 前日バー取り込み(スクショAI読み取り)のRATE_SHOT_SCHEMAにadditionalProperties: falseが抜けていたバグを修正(注文チェック機能のスキーマと違い漏れていた。Anthropic APIのjson_schema structured outputが要求する項目)
 const SHELL_FILES = [
   "./",
   "./index.html",
