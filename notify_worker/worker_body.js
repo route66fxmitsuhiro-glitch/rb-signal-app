@@ -90,6 +90,17 @@ function analysePair(pair, bars, weeklySrcBars, isFT5) {
   const weeklyIsNewToday = lastCompleteBarIsMonday(weeklySrcBars);
 
   const lines = [];
+  // 2026-09-14発見: 前々日・前日が連続した営業日でない(間の平日が丸ごと
+  // 欠落している)場合、日足判定(シグナルの有無・方向とも)は信用できない。
+  // missingTradingDaysのバグ(末尾バー起点で走査していたため内部の穴を
+  // 検出できなかった)は修正済みだが、Twelve Dataキー未設定等でなお穴が
+  // 残りうるため、通知でも二重に警告する。
+  if (dailySignal && dailySignal.dateGap && dailySignal.prevBar && dailySignal.prevPrevBar) {
+    lines.push(
+      `⚠️ ${pair.label} 日足: 前々日(${dailySignal.prevPrevBar.date})と前日(${dailySignal.prevBar.date})の間の` +
+        `営業日データが欠落しています。この日足判定は信用できません(スクショで補完してください)。`
+    );
+  }
   if (dailySignal && dailySignal.direction) {
     // 判定に日曜の薄商いバーが使われている場合の注記(2026-09-05、詳細はCLAUDE.md参照)。
     // 月曜=前日が日曜足(全体寄与3.8%・勝率43%で見送っても影響小)、

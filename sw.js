@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v37"; // v37: 最終最良設計をCoreAlloc(PF構造監査ステージ4、A+確定)に更新。日足コアのトランシェ配分をT0=0.03/T1=0.03/T2=0.02/T3=0.01/T4=0.01の直接指定に変更、EURJPYfadeOutにEJFadeRiskMult=0.75を反映(lot 0.18→0.135)、REFERENCE_MAX_DD_USDをコア単体の最新実機ログ基準に再計算(3369.33→1968.15)。あわせてworker.jsを再生成(2026-09-11の衝突ゲート追加が未反映のまま取り残されていたのも同時に解消)
+const CACHE_NAME = "rb-signal-shell-v38"; // v38: 重大バグ修正。missingTradingDaysが末尾バーの日付を起点に走査していたため、FT5とスクショの間に空いた"内部の穴"(例: 木曜だけ両方とも欠落)を検出できず、日足判定が前々日・前日として1営業日隔たっていない2本(例: 水曜と金曜)を無警告で比較していた(GBPJPYで実例確認: 本来アウトサイド継続=ショートのはずが「シグナルなし」と誤表示)。先頭バー起点の走査に修正し、Twelve Dataキー未設定等でなお穴が残る場合に備え日足カード・Discord通知の両方に「⚠前々日と前日の間が欠落」警告を追加。worker.js再生成済み。
 const SHELL_FILES = [
   "./",
   "./index.html",

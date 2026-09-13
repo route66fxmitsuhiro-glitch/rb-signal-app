@@ -463,6 +463,16 @@
     return { direction, outside: brokeHigh && brokeLow, brokeHigh, brokeLow };
   }
 
+  // 前々日→前日が実際に連続した営業日かを確認する(土日を挟むだけなら正常)。
+  // 間に平日が1日でも抜けていれば、その抜けた日の値動きを一切見ずに判定して
+  // いることになるため、呼び出し側で強く警告すべき状態(2026-09-14発見のバグ、
+  // missingTradingDaysの節を参照)。
+  function isNextTradingDay(fromDate, toDate) {
+    let d = shiftDate(fromDate, 1);
+    while (dowOf(d) === 0 || dowOf(d) === 6) d = shiftDate(d, 1);
+    return d === toDate;
+  }
+
   // シグナルの有無にかかわらず、必ず判定根拠(前々日/前日の高安)を含めて返す。
   function computeDailySignal(bars) {
     if (bars.length < 2) {
@@ -471,12 +481,17 @@
     const prev = bars[bars.length - 1];
     const prevPrev = bars[bars.length - 2];
     const res = breakoutDirection(prevPrev, prev);
+    const dateGap = !isNextTradingDay(prevPrev.date, prev.date);
     return {
       direction: res.direction,
       outside: res.outside,
       prevBar: prev,
       prevPrevBar: prevPrev,
       referenceDate: prev.date,
+      // 前々日・前日が営業日として連続していない(間の日のデータが丸ごと
+      // 欠落している)場合にtrue。trueの時、この判定結果(direction含む)は
+      // 信用してはいけない。
+      dateGap: dateGap,
       todayStopTrigger: res.direction ? (res.direction === "long" ? prev.low : prev.high) : null,
     };
   }
@@ -697,11 +712,21 @@
   }
 
   // 系列の中で欠けている営業日(月〜金)を洗い出す。Twelve Dataでの補完対象。
+  //
+  // 【2026-09-14修正、重大バグ】旧実装は末尾バーの日付から起点を取っていたため、
+  // 「FT5がN日前で止まっている状態でスクショが今日の分だけ先に入る」ケースで、
+  // FT5とスクショの間に空いた"内部の穴"(例: 木曜だけ両方とも欠落)を一切検出
+  // できなかった(末尾バーの日付が既にthroughLabel以上なら while が1回も回らず
+  // gaps=[]のまま)。この穴があると computeDailySignal の前々日/前日が実際には
+  // 1営業日隣り合っていない(木曜を飛ばして水曜と金曜を比較する等)のに警告なしで
+  // シグナルを計算してしまい、誤った判定(本来アウトサイド継続=ショートのはずが
+  // 「シグナルなし」と誤表示される等)につながっていた。修正: 系列の**先頭**バーの
+  // 日付から走査することで、末尾だけでなく内部の穴も含めて検出する。
   function missingTradingDays(bars, throughLabel) {
     if (!bars.length) return [];
     const have = new Set(bars.map((b) => b.date));
     const out = [];
-    let d = bars[bars.length - 1].date;
+    let d = bars[0].date;
     while (d < throughLabel) {
       d = shiftDate(d, 1);
       const wd = dowOf(d);

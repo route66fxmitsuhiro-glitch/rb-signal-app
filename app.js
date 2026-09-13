@@ -442,6 +442,23 @@ function renderWeeklyPreview(previewSignal, symbol) {
   `;
 }
 
+// 2026-09-14発見: 前々日・前日として使われた2本が実際には連続した営業日では
+// ない(間の平日が丸ごと欠落している)場合の強い警告。missingTradingDaysの
+// バグ(先頭ではなく末尾バーの日付を起点に走査していたため、FT5とスクショの
+// 間に空いた"内部の穴"を検出できていなかった)により、GBPJPYで木曜のデータが
+// 丸ごと欠落したまま水曜と金曜を比較し、本来アウトサイド継続=ショートのはずが
+// 「シグナルなし」と誤表示される事例が実際に発生した。missingTradingDays自体は
+// 修正済みだが(Twelve Dataキー未設定時など)なお穴が残る場合に備え、
+// computeDailySignalの結果を表示する時点でも二重に警告する。
+function dateGapNote(dsig) {
+  if (!dsig || !dsig.dateGap || !dsig.prevBar || !dsig.prevPrevBar) return "";
+  return `<p class="section-note" style="color:#c00;font-weight:bold;">
+    ⚠️ 前々日(${dsig.prevPrevBar.date})と前日(${dsig.prevBar.date})の間の営業日のデータが
+    欠落しており、抜けた日の値動きを見ずに判定しています。この日足判定(シグナルの
+    有無・方向とも)は信用できません。ブローカーのレート一覧スクショで抜けている日を
+    取り込んでから、「本日の判定を取得」を押し直してください。</p>`;
+}
+
 // 日足RideThinの判定根拠に日曜の立ち上がりバー(通常のブローカーのチャートには
 // 表示されない)が使われている場合の注記。2026-09-05の紙トレード照合・1分足試算
 // (sim_sunday_bar_ablation.py)で判明した実績を踏まえた文言:
@@ -654,6 +671,7 @@ function renderSignals(results) {
           → 前日 高${fmtPrice(dsig.prevBar.high, r.symbol)}/安${fmtPrice(dsig.prevBar.low, r.symbol)}(${dsig.prevBar.date}、
           ${dsig.prevBar.close >= dsig.prevBar.open ? "陽線" : "陰線"})
         </div>
+        ${dateGapNote(dsig)}
         ${sundayNote(dsig, r.dataSourceNote)}
         <table class="tranche-table">
           <thead><tr><th>枠</th><th>枚数</th><th>目標(pips)</th><th>初期逆指値目安</th></tr></thead>
@@ -691,6 +709,7 @@ function renderSignals(results) {
           → 前日 高${fmtPrice(dsig.prevBar.high, r.symbol)}/安${fmtPrice(dsig.prevBar.low, r.symbol)}(${dsig.prevBar.date}、
           高値更新: ${dsig.brokeHigh ? "○" : "×"} / 安値更新: ${dsig.brokeLow ? "○" : "×"})
         </div>
+        ${dateGapNote(dsig)}
         ${sundayNote(dsig, r.dataSourceNote)}
       `;
     }
