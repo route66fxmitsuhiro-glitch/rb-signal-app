@@ -70,9 +70,13 @@
     { id: "aud-day2", label: "AUDday2fail", symbol: "AUD/JPY", pair: "AUDJPY",
       kind: "day2_fail", title: "day-2ブレイク失敗フェード",
       gate: "high", erThreshold: 0.18, lookback: 15, stopMult: 1.5, holdDays: 7, lot: 0.18 },
+    // lot: EJFadeOutLotSize(0.18) * EJFadeRiskMult(0.75、2026-09-13 PF構造監査
+    // ステージ2でA+確定・生産値化)。EAは RoundLot(0.18*0.75*mult) を1回で丸めるので、
+    // ここは丸め前の積(0.135)のまま置く(satelliteLot()が scale/mult と合わせて
+    // 最後に1回だけ roundLot するのと、桁の丸めタイミングを一致させるため)。
     { id: "ej-fadeout", label: "EURJPYfadeOut", symbol: "EUR/JPY", pair: "EURJPY",
       kind: "outside_fade", title: "アウトサイドデイ・フェード",
-      gate: "low", erThreshold: 0.229, stopMult: 1.0, holdDays: 5, lot: 0.18 },
+      gate: "low", erThreshold: 0.229, stopMult: 1.0, holdDays: 5, lot: 0.135 },
   ];
 
   // ========== 衝突ゲート(RB_Broker_Conflict.dll の確定パラメータ、2026-09-11) ==========
@@ -108,16 +112,22 @@
     return 1.0;
   }
 
-  // ========== コアのロット倍率(RB_Broker balanced の確定値) ==========
+  // ========== コアのロット倍率(参考用、実際の計算は app.js の
+  // DAILY_TRANCHES/WEEKLY_TRANCHES/tranchesWithLots()が担う。このオブジェクトは
+  // どこからも消費されていないが、EA側パラメータとの対応記録として残す) ==========
+  // 2026-09-13、PF構造監査ステージ4(コアトランシェ配分の直接指定、A+確定)で
+  // trancheWeightベース(重み×共有ロット×DailyRideLotMult)から、
+  // CoreT0Lot〜CoreT4Lotの直接指定(T0=0.03/T1=0.03/T2=0.02/T3=0.01/T4=0.01、
+  // DailyRideLotMult=1.0に統一)へ変更。合計0.10は変わらず。
   const CORE_LOTS = {
-    lotSize: 0.10,          // LotSize(日足RideThin)
+    lotSize: 0.10,          // LotSize(日足RideThin、参照用の合計)
     wdLotSize: 0.10,        // WDLotSize(週足ドンチャン)
-    trancheWeight: [0.20, 0.20, 0.25, 0.20, 0.15],
+    coreTierLot: [0.03, 0.03, 0.02, 0.01, 0.01],  // CoreT0Lot..CoreT4Lot(直接指定)
     tierR: [0.1, 0.2, 0.3, 0.5, null],
     hardStopR: -1.0,
-    dailyRideLotMult: 0.5,  // DailyRideLotMult。rideトランシェのみに掛かる
-    wdT01LotMult: 0.334,    // 週足T0/T1
-    wdRideLotMult: 0.167,   // 週足ride
+    dailyRideLotMult: 1.0,  // CoreT4Lot=0.01が既にpre-shrinkの最終値のため1.0
+    wdT01LotMult: 0.334,    // 週足T0/T1(無改造)
+    wdRideLotMult: 0.167,   // 週足ride(無改造)
     wdTierR: [0.5, 1.0, null],
   };
 

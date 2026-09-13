@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v36"; // v36: 前日バー取り込み(スクショAI読み取り)のRATE_SHOT_SCHEMAにadditionalProperties: falseが抜けていたバグを修正(注文チェック機能のスキーマと違い漏れていた。Anthropic APIのjson_schema structured outputが要求する項目)
+const CACHE_NAME = "rb-signal-shell-v37"; // v37: 最終最良設計をCoreAlloc(PF構造監査ステージ4、A+確定)に更新。日足コアのトランシェ配分をT0=0.03/T1=0.03/T2=0.02/T3=0.01/T4=0.01の直接指定に変更、EURJPYfadeOutにEJFadeRiskMult=0.75を反映(lot 0.18→0.135)、REFERENCE_MAX_DD_USDをコア単体の最新実機ログ基準に再計算(3369.33→1968.15)。あわせてworker.jsを再生成(2026-09-11の衝突ゲート追加が未反映のまま取り残されていたのも同時に解消)
 const SHELL_FILES = [
   "./",
   "./index.html",

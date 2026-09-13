@@ -47,18 +47,22 @@ const {
 
 // ========== 設定値(EAの実装に合わせた固定値) ==========
 
-// 日足RideThin(Ride15配分)。targetR=nullは目標なし(ride、反対ブレイクのみ+ハードストップ)。
-// balanced(2026-09-10): rideトランシェに DailyRideLotMult=0.5 が掛かる。
-// EAは RoundLot(0.10*0.15)=0.02 → RoundLot(0.02*0.5)=0.01 → 0.01で床止め。
-// この結果 ride は通常時も縮小時も 0.01 に丸まり、rideサーキットブレーカーは
-// 現構成では損益に影響しない(実機ログで7,121件すべて0.01を確認済み)。
+// 日足RideThin。targetR=nullは目標なし(ride、反対ブレイクのみ+ハードストップ)。
+// CoreAlloc(2026-09-13、PF構造監査ステージ4、A+確定): トランシェ配分を
+// 重み比率(LotSize×weight×DailyRideLotMult)方式から、CoreT0Lot〜CoreT4Lotの
+// 直接指定(T0=0.03/T1=0.03/T2=0.02/T3=0.01/T4=0.01、合計0.10は不変)に変更。
+// EJF075(旧配分T0=0.02/T1=0.02/T2=0.03/T3=0.02/T4=0.01)比でprofit+0.07%・
+// PF+0.0117・DD-1.07%・RDD+1.15%を実機確認済み(23本フルA+再認証も合格)。
+// weightは「baseLot(0.10)に対する比率」として表現(tranchesWithLotsの既存の
+// 計算式 lot=roundLot(baseLot*weight*scale) をそのまま流用するため)。
+// rideはDailyRideLotMult=1.0(CoreT4Lot=0.01が既にpre-shrinkの最終値)なので
+// lotMultは使わず、floorLot=0.01のみ残す(念のための安全床)。
 const DAILY_TRANCHES = [
-  { name: "T0", weight: 0.20, targetR: 0.1 },
-  { name: "T1", weight: 0.20, targetR: 0.2 },
-  { name: "T2", weight: 0.25, targetR: 0.3 },
-  { name: "T3", weight: 0.20, targetR: 0.5 },
-  { name: "ride", weight: 0.15, targetR: null, hardStopR: -1.0,
-    lotMult: 0.5, floorLot: 0.01 },
+  { name: "T0", weight: 0.30, targetR: 0.1 },
+  { name: "T1", weight: 0.30, targetR: 0.2 },
+  { name: "T2", weight: 0.20, targetR: 0.3 },
+  { name: "T3", weight: 0.10, targetR: 0.5 },
+  { name: "ride", weight: 0.10, targetR: null, hardStopR: -1.0, floorLot: 0.01 },
 ];
 
 // 週足ドンチャン(3階層)。Rはブレイク幅そのもの(ATRではない)。rideにハードストップなし(教訓34)。
@@ -75,11 +79,20 @@ const BASE_LOT_DAILY = 0.10;   // バックテスト基準ロット(1ペアあ�
 const BASE_LOT_WEEKLY = 0.10;  // バックテスト基準ロット(1ペアあたり)
 // 実データの最大DD(口座通貨USD想定、0.10ロット基準)。
 // 【重要】このアプリはコア(日足RideThin+週足ドンチャン)のみを実装しており、
-// RB12tuned全体(コア+12衛星レイヤー)のDD(2,510.22)ではなく、コア単体の
-// DD(3,369.33、2026-08-16に確定損益ベースの疑似エクイティカーブで算出)を
-// 使う。12層による分散効果でDDが縮んでいるため、フル構成の数値をそのまま
-// 使うとコア単体運用としてはロットを過大評価してしまう。
-const REFERENCE_MAX_DD_USD = 3369.33;
+// RB_Broker_CoreAlloc_Test全体(コア+9衛星レイヤー)のDD(2,655.40)ではなく、
+// コア単体のDDを使う。衛星による分散効果でDDが縮んでいるため、フル構成の
+// 数値をそのまま使うとコア単体運用としてはロットを過大評価してしまう。
+// 2026-09-13、CoreAlloc確定(PF構造監査ステージ4)を機に再計算(実機ログ
+// `RB_Broker_CoreAlloc_Test.dll`からRTL-/RTS-/WDL-/WDS-コメントの
+// トレードだけを抽出し疑似エクイティカーブでDDを算出、1,968.15)。
+// 旧値3,369.33(2026-08-16算出)は、①ブローカー時間[NY17:00]日足区切りへの
+// 移行前、②旧トランシェ配分(T0=0.02/T1=0.02/T2=0.03/T3=0.02/T4=0.01)、
+// という2点で現行設計と条件が異なる古い値だったため差し替えた
+// (同じ抽出方法でEJF075[旧配分]を計算し直すと2,229.57で、旧値3,369.33との
+// 差の大半はブローカー時間移行による影響であり、トランシェ配分変更[ステージ4]
+// 単体の寄与は限定的と見られる)。この更新により、同じDD許容額に対する
+// 計算ロットは従来より大きくなる点に注意。
+const REFERENCE_MAX_DD_USD = 1968.15;
 
 // ========== ローカルストレージ ==========
 
