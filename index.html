@@ -160,14 +160,16 @@
       <p class="section-note">
         記録済みポジションごとに「ブローカーの注文一覧にこう出ているはず」を並べます。
         ブローカーのスマホアプリの注文一覧を見ながら、一致した項目にチェックを付けてください。
-        自動照合はしません(スクショは目視の参考用で、保存されません)。
+        AIキーを設定していれば自動照合もできます(スクショは端末のこのタブの間だけ保持され、
+        保存はされません)。注文一覧が長くて1枚に収まらない場合は、スクロールしながら
+        複数枚続けて貼ってください(まとめてAIに渡します)。
       </p>
       <div class="order-shot">
-        <label class="btn btn-ghost btn-small" for="orderShotInput">スクショを貼る / 撮る</label>
-        <input id="orderShotInput" type="file" accept="image/*" hidden />
-        <button id="orderShotClear" class="btn btn-ghost btn-small hidden" type="button">スクショを消す</button>
+        <label class="btn btn-ghost btn-small" for="orderShotInput">スクショを貼る / 撮る(複数可)</label>
+        <input id="orderShotInput" type="file" accept="image/*" multiple hidden />
+        <button id="orderShotClear" class="btn btn-ghost btn-small hidden" type="button">スクショを全部消す</button>
         <button id="ocAiBtn" class="btn btn-secondary btn-small hidden" type="button">AIで自動照合</button>
-        <img id="orderShotPreview" class="hidden" alt="ブローカー注文一覧のスクショ" />
+        <div id="orderShotPreviewList" class="order-shot-list"></div>
       </div>
       <p id="ocAiStatus" class="field-note"></p>
       <div id="orderCheckCards" class="stack"></div>

@@ -336,7 +336,7 @@ function currentExitLevel(pos, latestStopTrigger) {
 
 // ========== レンダリング ==========
 
-const state = { settings: loadSettings(), positions: loadPositions(), lastFetch: null, lastResults: null, autoUsdJpy: null, avgER: null, orderShot: null, orderCheckAiMeta: null };
+const state = { settings: loadSettings(), positions: loadPositions(), lastFetch: null, lastResults: null, autoUsdJpy: null, avgER: null, orderShots: [], orderCheckAiMeta: null };
 
 // EAのUSDOutsideレイヤーは専用の建玉スロットを1つだけ持ち、そのスロットが
 // 埋まっている間は新規シグナルを一切評価しない(方向は問わない = 同時に持てる
@@ -1239,26 +1239,61 @@ function renderOrderCheck() {
   });
 }
 
-// スクショ(目視の参考用)。sessionStorageに1枚だけ保持(タブを閉じると消える)。
-const LS_ORDERSHOT = "rbsignal_ordershot_v1";
+// スクショ(目視の参考用+AI照合の入力)。sessionStorageに配列で保持(タブを閉じると消える)。
+// 2026-09-14発見: 注文一覧が長くて1枚のスクショに収まらない(スクロールしながら
+// 複数枚撮る)実例が見つかった。旧実装は画像を1枚しか保持できず、AI照合には
+// 最後に貼った1枚しか渡っていなかったため、そこに写っていないペアが全部
+// 「見当たらず」と誤診断される事例が発生した(実際にはバグではなく、写っている
+// ペアについては正しく判定できていた)。複数枚を保持・全部AIに渡せるよう変更。
+const LS_ORDERSHOT = "rbsignal_ordershots_v2";
 
-function showOrderShot(dataUrl) {
-  const img = document.getElementById("orderShotPreview");
+function renderOrderShots() {
+  const list = document.getElementById("orderShotPreviewList");
   const clr = document.getElementById("orderShotClear");
   const aiBtn = document.getElementById("ocAiBtn");
-  if (!img) return;
-  state.orderShot = dataUrl || null;
-  if (dataUrl) {
-    img.src = dataUrl;
-    img.classList.remove("hidden");
-    clr.classList.remove("hidden");
-    if (aiBtn) aiBtn.classList.remove("hidden");
-  } else {
-    img.removeAttribute("src");
-    img.classList.add("hidden");
-    clr.classList.add("hidden");
-    if (aiBtn) aiBtn.classList.add("hidden");
-  }
+  if (!list) return;
+  const shots = state.orderShots || [];
+  list.innerHTML = shots
+    .map(
+      (url, i) => `
+      <div class="order-shot-item">
+        <img src="${url}" alt="注文一覧スクショ ${i + 1}" />
+        <span class="order-shot-index">${i + 1}</span>
+        <button type="button" class="order-shot-remove" data-idx="${i}" aria-label="このスクショを消す">×</button>
+      </div>`
+    )
+    .join("");
+  list.querySelectorAll(".order-shot-remove").forEach((btn) => {
+    btn.addEventListener("click", () => removeOrderShot(Number(btn.dataset.idx)));
+  });
+  const has = shots.length > 0;
+  if (clr) clr.classList.toggle("hidden", !has);
+  if (aiBtn) aiBtn.classList.toggle("hidden", !has);
+}
+
+function persistOrderShots() {
+  try {
+    if (state.orderShots.length) sessionStorage.setItem(LS_ORDERSHOT, JSON.stringify(state.orderShots));
+    else sessionStorage.removeItem(LS_ORDERSHOT);
+  } catch (e) {}
+}
+
+function addOrderShots(dataUrls) {
+  state.orderShots = [...(state.orderShots || []), ...dataUrls];
+  renderOrderShots();
+  persistOrderShots();
+}
+
+function removeOrderShot(idx) {
+  state.orderShots = (state.orderShots || []).filter((_, i) => i !== idx);
+  renderOrderShots();
+  persistOrderShots();
+}
+
+function clearOrderShots() {
+  state.orderShots = [];
+  renderOrderShots();
+  persistOrderShots();
 }
 
 // 画像を長辺 maxEdge px 以下に縮小して data URL を返す(送信コスト・容量を抑える)。
@@ -1287,6 +1322,14 @@ function downscaleImage(dataUrl, maxEdge) {
   });
 }
 
+function readFileAsDataUrl(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.readAsDataURL(file);
+  });
+}
+
 function initOrderShotUI() {
   const input = document.getElementById("orderShotInput");
   const clr = document.getElementById("orderShotClear");
@@ -1294,24 +1337,26 @@ function initOrderShotUI() {
   if (!input) return;
   try {
     const saved = sessionStorage.getItem(LS_ORDERSHOT);
-    if (saved) showOrderShot(saved);
+    if (saved) {
+      state.orderShots = JSON.parse(saved);
+      renderOrderShots();
+    }
   } catch (e) {}
-  input.addEventListener("change", () => {
-    const file = input.files && input.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const { dataUrl } = await downscaleImage(reader.result, 1568);
-      showOrderShot(dataUrl);
-      try { sessionStorage.setItem(LS_ORDERSHOT, dataUrl); } catch (e) {}
-    };
-    reader.readAsDataURL(file);
+  input.addEventListener("change", async () => {
+    const files = input.files ? Array.from(input.files) : [];
     input.value = "";
+    if (!files.length) return;
+    // 選んだ枚数だけ順番に縮小してまとめて追加(スクロールしながら撮った
+    // 複数枚をそのまま続けて貼れるように)。
+    const added = [];
+    for (const file of files) {
+      const raw = await readFileAsDataUrl(file);
+      const { dataUrl } = await downscaleImage(raw, 1568);
+      added.push(dataUrl);
+    }
+    addOrderShots(added);
   });
-  clr.addEventListener("click", () => {
-    showOrderShot(null);
-    try { sessionStorage.removeItem(LS_ORDERSHOT); } catch (e) {}
-  });
+  clr.addEventListener("click", clearOrderShots);
   if (aiBtn) aiBtn.addEventListener("click", runAiOrderCheck);
 }
 
@@ -1325,7 +1370,8 @@ async function runAiOrderCheck() {
     statusEl.classList.add("error");
     return;
   }
-  if (!state.orderShot) {
+  const shots = state.orderShots || [];
+  if (!shots.length) {
     statusEl.textContent = "先にブローカーの注文一覧スクショを貼ってください。";
     statusEl.classList.add("error");
     return;
@@ -1348,14 +1394,19 @@ async function runAiOrderCheck() {
       .map((it) => ({ key: `${pos.id}::${it.key}`, label: it.label })),
   }));
 
-  const m = /^data:(image\/[a-z+]+);base64,(.+)$/s.exec(state.orderShot);
-  if (!m) {
-    statusEl.textContent = "画像の形式を認識できませんでした。別のスクショで試してください。";
-    statusEl.classList.add("error");
-    return;
+  // 複数枚に分けて撮ったスクショ(スクロール違い)をそれぞれ画像ブロックにする。
+  // 1枚でも形式を認識できないものがあれば送信前に止める(不完全なリストで
+  // 「見当たらず」と誤診断されるのを防ぐ)。
+  const imageBlocks = [];
+  for (const shot of shots) {
+    const m = /^data:(image\/[a-z+]+);base64,(.+)$/s.exec(shot);
+    if (!m) {
+      statusEl.textContent = "画像の形式を認識できないスクショが含まれています。貼り直してください。";
+      statusEl.classList.add("error");
+      return;
+    }
+    imageBlocks.push({ type: "image", source: { type: "base64", media_type: m[1], data: m[2] } });
   }
-  const mediaType = m[1];
-  const b64 = m[2];
 
   const schema = {
     type: "object",
@@ -1385,7 +1436,9 @@ async function runAiOrderCheck() {
 
   const system =
     "あなたはシステムトレードの発注チェック補助です。ユーザーがFXブローカーのスマホアプリの" +
-    "「注文一覧/建玉一覧」のスクリーンショット(日本語、GMOクリック証券など)を提示します。" +
+    "「注文一覧/建玉一覧」のスクリーンショット(日本語、GMOクリック証券など)を1枚以上提示します" +
+    "(一覧が長い場合、スクロールしながら分けて撮った複数枚が渡されることがあります。" +
+    "その場合は全部を1つの一覧とみなして照合してください。重複行があっても構いません)。" +
     "別途渡す『期待される注文リスト』(各項目にkeyとlabel)と、スクショに写っている実際の注文/建玉を照合してください。" +
     "照合の指針: (1)通貨ペア表記の揺れ(GBP/JPY, GBPJPY, ポンド円 等)は同一視。" +
     "(2)方向: 買い/ロング/BUY = long、売り/ショート/SELL = short。" +
@@ -1423,10 +1476,13 @@ async function runAiOrderCheck() {
           {
             role: "user",
             content: [
-              { type: "image", source: { type: "base64", media_type: mediaType, data: b64 } },
+              ...imageBlocks,
               {
                 type: "text",
                 text:
+                  (imageBlocks.length > 1
+                    ? `上の${imageBlocks.length}枚は同じ注文一覧をスクロールしながら分けて撮ったものです(順不同・重複あり得ます)。すべて合わせて1つの一覧として照合してください。\n\n`
+                    : "") +
                   "期待される注文リスト(JSON):\n" +
                   JSON.stringify(expected, null, 1) +
                   "\n\n上のスクリーンショットと照合し、指定スキーマのJSONで返してください。",
