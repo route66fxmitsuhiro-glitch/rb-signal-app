@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v40"; // v40: 「過去1週間分の4本値を手動編集」ページ(edit-bars.html/edit-bars.js)を新設。毎朝の確定前スクショで終値等がずれた場合に、直近10営業日分の日足を直接書き換えてlocalStorage(rb_bar_history_v1)に保存できる。既存のスクショ取り込みと同じ保存先・同じ検算ロジック(validateReconstructedBar)を共有するため、loadBarHistory/saveBarHistory/appendShotBars/removeShotBarをapp.jsからsignal-core.jsへ移動(教訓90、二重実装の防止)。index.htmlに導線リンクを追加。
+const CACHE_NAME = "rb-signal-shell-v41"; // v41: edit-bars.htmlがFT5+スクショ履歴だけを見ていてTwelve Data補完を実装していなかったため(index.htmlはacquireBars()で自動補完している)、両ページで表示が食い違う不整合があった。acquireBars/loadSettings/saveSettingsをapp.jsからsignal-core.jsへ移動して共有し、edit-bars.htmlでもAPIキーが設定されていればTwelve Dataで自動補完されるようにした(教訓90)。v40: 「過去1週間分の4本値を手動編集」ページ(edit-bars.html/edit-bars.js)を新設。
 const SHELL_FILES = [
   "./",
   "./index.html",

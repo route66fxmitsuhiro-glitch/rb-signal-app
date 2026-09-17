@@ -17,15 +17,13 @@ const {
   quoteDecimals,
   shiftDate,
   dowOf,
-  isDegenerateBar,
-  fetchFT5Export,
-  mergeBarSeries,
-  loadBarHistory,
+  loadSettings,
   appendShotBars,
   removeShotBar,
   validateReconstructedBar,
   computeATR14,
   lastCapturableSessionLabel,
+  acquireBars,
 } = SignalCore;
 
 const N_DAYS = 10; // 「過去1週間」より少し広めに表示しておく
@@ -53,16 +51,15 @@ function recentTradingDates(endDate, n) {
   return dates.reverse();
 }
 
-// このページで保持する状態: symbol -> { rows, merged }
+// このページで保持する状態: symbol -> { rows, merged, note, gaps }
 const state = {};
 
+// acquireBars(FT5→スクショ→欠けている営業日だけTwelve Data補完)をindex.htmlと
+// 共有しているため、Twelve Data APIキーが設定されていれば、このページでも
+// index.html同様に自動補完される(教訓90、二重実装によるロジックのズレの防止)。
 async function loadPair(symbol) {
-  const exp = await fetchFT5Export();
-  const ft5 = ((exp && exp.pairs && exp.pairs[symbol]) || []).map((b) =>
-    Object.assign({}, b, { src: "ft5" })
-  );
-  const shots = loadBarHistory()[symbol] || [];
-  const merged = mergeBarSeries(ft5, shots).filter((b) => !isDegenerateBar(b));
+  const apiKey = (loadSettings().apiKey || "").trim();
+  const { bars: merged, note, gaps } = await acquireBars(symbol, apiKey);
   const end = lastCapturableSessionLabel();
   const dates = recentTradingDates(end, N_DAYS);
   const byDate = new Map(merged.map((b) => [b.date, b]));
@@ -77,7 +74,7 @@ async function loadPair(symbol) {
       src: bar ? bar.src : null,
     };
   });
-  state[symbol] = { rows, merged };
+  state[symbol] = { rows, merged, note, gaps };
   return state[symbol];
 }
 
@@ -98,9 +95,11 @@ function renderPairSection(symbol) {
           `<td><input type="number" step="${Math.pow(10, -dec)}" inputmode="decimal"
             data-field="${f}" value="${fmt(r[f], dec)}" /></td>`
       ).join("");
+      // ft5=最も信頼できる基準、shot/td はいずれも「一度は要確認」の値として
+      // 同じ警告色で揃える(tdはFT5との既知の食い違いがあり、shotは人間の入力)。
       const srcBadge = missing
         ? '<span class="badge none">なし</span>'
-        : `<span class="badge ${r.src === "shot" ? "warn" : "none"} bar-edit-src">${SRC_LABEL[r.src] || r.src}</span>`;
+        : `<span class="badge ${r.src === "ft5" ? "none" : "warn"} bar-edit-src">${SRC_LABEL[r.src] || r.src}</span>`;
       const resetBtn = `<button type="button" class="bar-edit-reset" data-date="${r.date}"
         ${r.src === "shot" ? "" : "disabled"}>FT5に戻す</button>`;
       return `<tr class="bar-edit-row${missing ? " missing" : ""}" data-index="${i}" data-date="${r.date}">
@@ -116,6 +115,7 @@ function renderPairSection(symbol) {
     <div class="section-head">
       <h2>${PAIR_LABEL[symbol]}</h2>
     </div>
+    <p class="pair-meta">${s.note || ""}</p>
     <div class="tablewrap"><table class="bar-edit-table">
       <thead><tr>
         <th>日付</th><th>始値</th><th>高値</th><th>安値</th><th>終値</th><th>元</th><th></th>

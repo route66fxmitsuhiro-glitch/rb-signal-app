@@ -22,22 +22,21 @@ const {
   dowOf,
   addTradingDays,
   fetchRawDailyValuesAuto,
-  fetchFT5Export,
-  fetchTwelveDataDaily,
-  processDailyBars,
   shiftDate,
   quoteDecimals,
   reconstructBarFromQuote,
   validateReconstructedBar,
   screenshotSessionLabel,
   lastCapturableSessionLabel,
-  mergeBarSeries,
-  missingTradingDays,
+  LS_SETTINGS,
+  loadSettings,
+  saveSettings,
   LS_BARHIST,
   SHOT_SYMBOLS,
   loadBarHistory,
   saveBarHistory,
   appendShotBars,
+  acquireBars,
   computeATR14,
   computeDailySignal,
   computeAvgER,
@@ -100,28 +99,11 @@ const BASE_LOT_WEEKLY = 0.10;  // バックテスト基準ロット(1ペアあ�
 const REFERENCE_MAX_DD_USD = 1968.15;
 
 // ========== ローカルストレージ ==========
+// LS_SETTINGS / loadSettings / saveSettings は signal-core.js に集約
+// (edit-bars.js も Twelve Data APIキーを読むために共有、教訓90)。
 
-const LS_SETTINGS = "rbsignal_settings_v1";
 const LS_POSITIONS = "rbsignal_positions_v1";
 const LS_THEME = "rbsignal_theme_v1";
-
-function loadSettings() {
-  const raw = localStorage.getItem(LS_SETTINGS);
-  const defaults = {
-    apiKey: "", capitalJpy: 3000000, ddPct: 20, usdJpy: 150,
-    usdJpyAuto: true,       // USD/JPYレートを前日終値から自動取得する
-    usdJpyCached: null,     // 直近の取得値(セッションをまたいでロット計算に使う)
-    usdJpyCachedDate: null,
-    anthropicKey: "",       // 注文チェックのAI照合用(任意)。この端末にのみ保存。
-    visionModel: "claude-opus-5",
-  };
-  if (!raw) return defaults;
-  try { return { ...defaults, ...JSON.parse(raw) }; } catch { return defaults; }
-}
-
-function saveSettings(s) {
-  localStorage.setItem(LS_SETTINGS, JSON.stringify(s));
-}
 
 function loadPositions() {
   const raw = localStorage.getItem(LS_POSITIONS);
@@ -1831,54 +1813,8 @@ function renderShotReview(rows, session) {
   }
 }
 
-// 1ペア分の日足系列を組み立てる。
-//
-// 土台 = FT5エクスポート(実機と同じ日足、GitHub Pagesから取得)
-// 上書き = スクショ由来の履歴(ブローカー実物。localStorage)
-// 穴埋め = Twelve Data(撮り忘れ・祝日の保険。欠けている営業日だけ)
-//
-// 優先度は mergeBarSeries が shot > ft5 > td で解決する。
-// スクショで最新まで揃っていれば Twelve Data は呼ばない(APIコールの節約と、
-// 精度の低いデータを混ぜないため)。
-async function acquireBars(symbol, apiKey) {
-  const exp = await fetchFT5Export();
-  const ft5 = ((exp && exp.pairs && exp.pairs[symbol]) || []).map((b) =>
-    Object.assign({}, b, { src: "ft5" })
-  );
-  const shots = loadBarHistory()[symbol] || [];
-  let bars = mergeBarSeries(ft5, shots);
-
-  const target = lastCapturableSessionLabel();
-  let gaps = missingTradingDays(bars, target);
-
-  const parts = [];
-  if (ft5.length) parts.push(`FT5 ${ft5.length}本`);
-  if (shots.length) parts.push(`スクショ ${shots.length}本`);
-
-  if (gaps.length) {
-    if (!apiKey) {
-      parts.push(`⚠未取得 ${gaps.length}日(APIキー未設定で補完できません)`);
-    } else {
-      try {
-        const td = (await fetchTwelveDataDaily(symbol, apiKey))
-          .filter((b) => gaps.indexOf(b.date) >= 0)
-          .map((b) => Object.assign({}, b, { src: "td" }));
-        bars = mergeBarSeries(bars, td);
-        const still = missingTradingDays(bars, target);
-        if (td.length) parts.push(`Twelve Data補完 ${td.length}本`);
-        if (still.length) parts.push(`⚠未取得 ${still.length}日(${still.join(", ")})`);
-        gaps = still;
-      } catch (e) {
-        parts.push(`⚠Twelve Data補完に失敗(${e.message})`);
-      }
-    }
-  }
-  if (bars.length) {
-    const last = bars[bars.length - 1];
-    parts.push(`最終 ${last.date}(${{ shot: "スクショ", ft5: "FT5", td: "TD" }[last.src] || "?"})`);
-  }
-  return { bars: processDailyBars(bars, { dropForming: false }), note: parts.join(" / "), gaps: gaps };
-}
+// acquireBars(symbol, apiKey) は signal-core.js に集約(edit-bars.js も
+// 共有、教訓90)。FT5→スクショ→欠けている営業日だけTwelve Dataで補完、の3段構成。
 
 function describeShotWindow() {
   const el = document.getElementById("rateShotWindow");

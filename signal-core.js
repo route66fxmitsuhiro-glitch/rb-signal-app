@@ -627,6 +627,37 @@
     return { errors: errors, warnings: warnings };
   }
 
+  // ========== ユーザー設定(localStorage) ==========
+  // app.js だけでなく edit-bars.js も Twelve Data APIキーを読むために使う。
+  const LS_SETTINGS = "rbsignal_settings_v1";
+  const SETTINGS_DEFAULTS = {
+    apiKey: "", capitalJpy: 3000000, ddPct: 20, usdJpy: 150,
+    usdJpyAuto: true,       // USD/JPYレートを前日終値から自動取得する
+    usdJpyCached: null,     // 直近の取得値(セッションをまたいでロット計算に使う)
+    usdJpyCachedDate: null,
+    anthropicKey: "",       // 注文チェックのAI照合用(任意)。この端末にのみ保存。
+    visionModel: "claude-opus-5",
+  };
+
+  function loadSettings() {
+    try {
+      const raw = localStorage.getItem(LS_SETTINGS);
+      if (!raw) return Object.assign({}, SETTINGS_DEFAULTS);
+      return Object.assign({}, SETTINGS_DEFAULTS, JSON.parse(raw));
+    } catch (e) {
+      return Object.assign({}, SETTINGS_DEFAULTS);
+    }
+  }
+
+  function saveSettings(s) {
+    try {
+      localStorage.setItem(LS_SETTINGS, JSON.stringify(s));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   // ========== スクショ由来(および手動編集)の日足バー履歴(localStorage) ==========
   // app.js(スクショ取り込みUI)と edit-bars.js(過去1週間分の手動編集ページ)の
   // 両方がこの一箇所だけを共有することで、「実装が2箇所に分散すると必ずどちらかが
@@ -678,6 +709,56 @@
     if (h[symbol].length === before) return false;
     saveBarHistory(h);
     return true;
+  }
+
+  // 1ペア分の日足系列を組み立てる。app.js(index.html)と edit-bars.js の両方が
+  // 使う(教訓90、二重実装の防止)。
+  //
+  // 土台 = FT5エクスポート(実機と同じ日足、GitHub Pagesから取得)
+  // 上書き = スクショ由来の履歴(ブローカー実物。localStorage)
+  // 穴埋め = Twelve Data(撮り忘れ・祝日の保険。欠けている営業日だけ)
+  //
+  // 優先度は mergeBarSeries が shot > ft5 > td で解決する。
+  // スクショで最新まで揃っていれば Twelve Data は呼ばない(APIコールの節約と、
+  // 精度の低いデータを混ぜないため)。
+  async function acquireBars(symbol, apiKey) {
+    const exp = await fetchFT5Export();
+    const ft5 = ((exp && exp.pairs && exp.pairs[symbol]) || []).map((b) =>
+      Object.assign({}, b, { src: "ft5" })
+    );
+    const shots = loadBarHistory()[symbol] || [];
+    let bars = mergeBarSeries(ft5, shots);
+
+    const target = lastCapturableSessionLabel();
+    let gaps = missingTradingDays(bars, target);
+
+    const parts = [];
+    if (ft5.length) parts.push(`FT5 ${ft5.length}本`);
+    if (shots.length) parts.push(`スクショ ${shots.length}本`);
+
+    if (gaps.length) {
+      if (!apiKey) {
+        parts.push(`⚠未取得 ${gaps.length}日(APIキー未設定で補完できません)`);
+      } else {
+        try {
+          const td = (await fetchTwelveDataDaily(symbol, apiKey))
+            .filter((b) => gaps.indexOf(b.date) >= 0)
+            .map((b) => Object.assign({}, b, { src: "td" }));
+          bars = mergeBarSeries(bars, td);
+          const still = missingTradingDays(bars, target);
+          if (td.length) parts.push(`Twelve Data補完 ${td.length}本`);
+          if (still.length) parts.push(`⚠未取得 ${still.length}日(${still.join(", ")})`);
+          gaps = still;
+        } catch (e) {
+          parts.push(`⚠Twelve Data補完に失敗(${e.message})`);
+        }
+      }
+    }
+    if (bars.length) {
+      const last = bars[bars.length - 1];
+      parts.push(`最終 ${last.date}(${{ shot: "スクショ", ft5: "FT5", td: "TD" }[last.src] || "?"})`);
+    }
+    return { bars: processDailyBars(bars, { dropForming: false }), note: parts.join(" / "), gaps: gaps };
   }
 
   // スクショを撮った時刻から、完成させるバーの日付ラベルと撮影窓の状態を返す。
@@ -1128,12 +1209,16 @@
     lastCapturableSessionLabel,
     mergeBarSeries,
     missingTradingDays,
+    LS_SETTINGS,
+    loadSettings,
+    saveSettings,
     LS_BARHIST,
     SHOT_SYMBOLS,
     loadBarHistory,
     saveBarHistory,
     appendShotBars,
     removeShotBar,
+    acquireBars,
     dowOf,
     addTradingDays,
     isDegenerateBar,
