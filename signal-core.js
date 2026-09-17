@@ -627,6 +627,59 @@
     return { errors: errors, warnings: warnings };
   }
 
+  // ========== スクショ由来(および手動編集)の日足バー履歴(localStorage) ==========
+  // app.js(スクショ取り込みUI)と edit-bars.js(過去1週間分の手動編集ページ)の
+  // 両方がこの一箇所だけを共有することで、「実装が2箇所に分散すると必ずどちらかが
+  // 腐る」という教訓(教訓90等)通りのズレを防ぐ。手動編集で直したバーも
+  // src:"shot" のまま保存する(スクショの値を人間が手で直したもの、という
+  // 位置づけで、mergeBarSeries の優先度[shot>ft5>td]に自然に乗る)。
+  const LS_BARHIST = "rb_bar_history_v1";
+  const SHOT_SYMBOLS = ["GBP/JPY", "GBP/USD", "USD/JPY", "AUD/JPY", "EUR/JPY"];
+
+  function loadBarHistory() {
+    try {
+      const raw = localStorage.getItem(LS_BARHIST);
+      const obj = raw ? JSON.parse(raw) : {};
+      return obj && typeof obj === "object" ? obj : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function saveBarHistory(h) {
+    try {
+      localStorage.setItem(LS_BARHIST, JSON.stringify(h));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // スクショ(または手動編集)由来のバーを履歴に追記する。同じ日付は上書き。
+  // bars = { "GBP/JPY": {date,open,high,low,close,src}, ... }(1シンボル分だけでもよい)
+  function appendShotBars(bars) {
+    const h = loadBarHistory();
+    for (const symbol of Object.keys(bars)) {
+      const arr = (h[symbol] || []).filter((b) => b.date !== bars[symbol].date);
+      arr.push(bars[symbol]);
+      arr.sort((a, b) => (a.date < b.date ? -1 : 1));
+      // 週足ATR14に日足75本要るので、余裕を見て200本だけ残す
+      h[symbol] = arr.slice(-200);
+    }
+    return saveBarHistory(h);
+  }
+
+  // 指定シンボル・日付のスクショ由来バーを履歴から取り除く(=FT5の値に戻す)。
+  function removeShotBar(symbol, date) {
+    const h = loadBarHistory();
+    if (!h[symbol]) return false;
+    const before = h[symbol].length;
+    h[symbol] = h[symbol].filter((b) => b.date !== date);
+    if (h[symbol].length === before) return false;
+    saveBarHistory(h);
+    return true;
+  }
+
   // スクショを撮った時刻から、完成させるバーの日付ラベルと撮影窓の状態を返す。
   function screenshotSessionLabel(now) {
     const d = now || new Date();
@@ -1075,6 +1128,12 @@
     lastCapturableSessionLabel,
     mergeBarSeries,
     missingTradingDays,
+    LS_BARHIST,
+    SHOT_SYMBOLS,
+    loadBarHistory,
+    saveBarHistory,
+    appendShotBars,
+    removeShotBar,
     dowOf,
     addTradingDays,
     isDegenerateBar,

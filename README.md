@@ -169,6 +169,11 @@ print("秘密鍵:", base64.urlsafe_b64encode(priv_bytes).decode().rstrip("="))
 ## ファイル構成
 
 - `index.html` / `style.css` / `app.js` — アプリ本体(UI・localStorage管理)
+- `edit-bars.html` / `edit-bars.js` — 過去1週間分(直近10営業日)の日足4本値を
+  ペアごとに一覧表示し、直接書き換えて保存できるページ。確定前スクショで
+  取り込んだ値を後から補正する用途。保存先(`rb_bar_history_v1`)・検算ロジック
+  (`validateReconstructedBar`)は`index.html`のスクショ取り込みと共通(いずれも
+  `signal-core.js`に集約)。トップページの「前日バーの取り込み」欄からリンク。
 - `signal-core.js` — シグナル判定の純粋ロジック(アプリ本体と通知バッチの両方から
   共有で読み込む。ブラウザの`<script>`タグからもNode.jsの`require()`からも使える)
 - `notify/check-signals.js` — GitHub Actionsから実行するWeb Push通知バッチ(Node.js)

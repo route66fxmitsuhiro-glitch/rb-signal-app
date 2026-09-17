@@ -33,6 +33,11 @@ const {
   lastCapturableSessionLabel,
   mergeBarSeries,
   missingTradingDays,
+  LS_BARHIST,
+  SHOT_SYMBOLS,
+  loadBarHistory,
+  saveBarHistory,
+  appendShotBars,
   computeATR14,
   computeDailySignal,
   computeAvgER,
@@ -1648,42 +1653,9 @@ function manualAddPosition() {
 // 取得して土台にし、その上にスクショ由来を重ねる(mergeBarSeries の優先度は
 // shot > ft5 > td)。こうすると localStorage が小さいまま保て、FT5を久しぶりに
 // 更新したときもその結果が自然に反映される。
-const LS_BARHIST = "rb_bar_history_v1";
+// LS_BARHIST / SHOT_SYMBOLS / loadBarHistory / saveBarHistory / appendShotBars は
+// signal-core.js に集約(edit-bars.js と共有するため、ファイル冒頭の分割代入を参照)。
 const LS_RATESHOT = "rb_rate_shot"; // 直近のスクショ(sessionStorage、目視用)
-
-// アプリが使う5ペア。スクショにはEUR/USDやGBL/JPYも写るが対象外。
-const SHOT_SYMBOLS = ["GBP/JPY", "GBP/USD", "USD/JPY", "AUD/JPY", "EUR/JPY"];
-
-function loadBarHistory() {
-  try {
-    const raw = localStorage.getItem(LS_BARHIST);
-    const obj = raw ? JSON.parse(raw) : {};
-    return obj && typeof obj === "object" ? obj : {};
-  } catch (e) {
-    return {};
-  }
-}
-
-function saveBarHistory(h) {
-  try {
-    localStorage.setItem(LS_BARHIST, JSON.stringify(h));
-  } catch (e) {
-    alert("履歴の保存に失敗しました(localStorageが一杯の可能性があります)");
-  }
-}
-
-// スクショ由来のバーを履歴に追記する。同じ日付は上書き。
-function appendShotBars(bars) {
-  const h = loadBarHistory();
-  for (const symbol of Object.keys(bars)) {
-    const arr = (h[symbol] || []).filter((b) => b.date !== bars[symbol].date);
-    arr.push(bars[symbol]);
-    arr.sort((a, b) => (a.date < b.date ? -1 : 1));
-    // 週足ATR14に日足75本要るので、余裕を見て200本だけ残す
-    h[symbol] = arr.slice(-200);
-  }
-  saveBarHistory(h);
-}
 
 const RATE_SHOT_SCHEMA = {
   type: "object",
@@ -1849,7 +1821,10 @@ function renderShotReview(rows, session) {
     commit.addEventListener("click", () => {
       const bars = {};
       for (const r of rows) bars[r.symbol] = r.bar;
-      appendShotBars(bars);
+      if (!appendShotBars(bars)) {
+        alert("履歴の保存に失敗しました(localStorageが一杯の可能性があります)");
+        return;
+      }
       el.innerHTML = `<p class="section-note">${session.label} のバーを取り込みました。
         「本日の判定を取得」を押すと、この値で判定します。</p>`;
     });

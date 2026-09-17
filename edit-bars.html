@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#14161b" />
+<title>4本値の手動編集 | RBシグナル</title>
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="page">
+
+    <header class="topbar">
+      <div class="topbar-title">
+        <a class="nav-link" href="./index.html">← RBシグナルに戻る</a>
+        <h1>4本値の手動編集</h1>
+      </div>
+      <button id="themeToggle" class="icon-btn" aria-label="テーマ切替" type="button">◐</button>
+    </header>
+
+    <p class="disclaimer">
+      直近の日足(始値・高値・安値・終値)を、この端末の履歴(スクショ取り込みと同じ保存先)に
+      直接書き込みます。<strong>朝の確定前スクショで取り込んだ値が、後で確定値とズレていた
+      場合の補正用</strong>です。ここで保存した値は「本日の判定を取得」でそのまま使われます。
+      1桁の誤読が今後の判定をずっと狂わせるため、保存前に画面と1桁ずつ見比べてください。
+    </p>
+
+    <p id="loadStatus" class="fetch-status"></p>
+
+    <div id="pairSections" class="stack"></div>
+
+  </div>
+
+  <script src="signal-core.js"></script>
+  <script src="edit-bars.js"></script>
+</body>
+</html>

@@ -1,12 +1,14 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v39"; // v39: 注文チェックの「AIで自動照合」がスクショ1枚しか保持できず、注文一覧が長くて1枚に収まらない(スクロールして複数枚撮る)場合、写っていないペアが全部「見当たらず」と誤診断される実例が見つかったため修正。state.orderShot(単数)→state.orderShots(配列)に変更し、複数枚まとめて選択・追加・個別削除できるUIにし、AI照合リクエストでは全枚を画像ブロックとしてまとめて送るよう変更(重複行があってもよい旨をプロンプトに明記)。index.html/style.cssのプレビューUIもサムネイル一覧表示に変更。
+const CACHE_NAME = "rb-signal-shell-v40"; // v40: 「過去1週間分の4本値を手動編集」ページ(edit-bars.html/edit-bars.js)を新設。毎朝の確定前スクショで終値等がずれた場合に、直近10営業日分の日足を直接書き換えてlocalStorage(rb_bar_history_v1)に保存できる。既存のスクショ取り込みと同じ保存先・同じ検算ロジック(validateReconstructedBar)を共有するため、loadBarHistory/saveBarHistory/appendShotBars/removeShotBarをapp.jsからsignal-core.jsへ移動(教訓90、二重実装の防止)。index.htmlに導線リンクを追加。
 const SHELL_FILES = [
   "./",
   "./index.html",
+  "./edit-bars.html",
   "./style.css",
   "./signal-core.js",
   "./app.js",
+  "./edit-bars.js",
   "./manifest.json",
   "./icons/icon-192.png",
   "./icons/icon-512.png",

@@ -473,6 +473,8 @@ h2 {
   margin-top: 4px;
 }
 
+.tablewrap { overflow-x: auto; }
+
 .tranche-table {
   width: 100%;
   border-collapse: collapse;
@@ -557,3 +559,80 @@ h2 {
 }
 
 .btn-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+
+/* --- 過去1週間分の手動編集ページ(edit-bars.html) --- */
+.nav-link {
+  font-size: 0.8rem;
+  color: var(--accent);
+  text-decoration: none;
+}
+.nav-link:hover { text-decoration: underline; }
+
+.bar-edit-table {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: collapse;
+  margin-top: 10px;
+  font-size: 0.78rem;
+}
+.bar-edit-table th, .bar-edit-table td {
+  padding: 5px 3px;
+  text-align: center;
+  border-bottom: 1px solid var(--border);
+}
+.bar-edit-table th {
+  color: var(--text-dim);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+.bar-edit-table td:first-child, .bar-edit-table th:first-child { text-align: left; }
+.bar-edit-table input {
+  width: 100%;
+  min-width: 64px;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8rem;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 4px;
+  text-align: right;
+}
+.bar-edit-table input:disabled {
+  opacity: 0.55;
+  background: transparent;
+}
+.bar-edit-row.changed input {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.bar-edit-row.missing td { color: var(--text-dim); }
+.bar-edit-date {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.bar-edit-src {
+  font-size: 0.66rem;
+  white-space: nowrap;
+}
+.bar-edit-reset {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 2px;
+}
+.bar-edit-reset:disabled { visibility: hidden; }
+.pair-edit-status {
+  font-size: 0.76rem;
+  color: var(--text-dim);
+  margin-top: 8px;
+  min-height: 1em;
+}
+.pair-edit-status.error { color: var(--negative); }
+.pair-edit-status.ok { color: var(--positive); }
