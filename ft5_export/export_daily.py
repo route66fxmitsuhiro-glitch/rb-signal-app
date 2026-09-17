@@ -19,6 +19,18 @@ FT5が実際に使っている日足と**丸1日ずれる**ことが実測で判
 EAが `High(1)` などで参照するバーと同一。区切りの計算がゼロになるので、
 このセッションで丸一日溶かした「1日ずれ」の類のバグが構造的に起こらない。
 
+【2026-09-17、さらに1日ずれを発見・修正: D1キャッシュのラベル自体が
+セッション終了日基準だった】
+上記の切り替えでバー自体の値動きは正しくなったが、**D1キャッシュが
+付けている日付ラベル自体**が、ブローカー(GMOクリック証券)・EAの
+OpenTime・1分足PKLからの独自集計(reconcile_app_core.py、99%超で
+一致確認済み)が使う「セッション開始日」基準ではなく、「セッション
+終了日」基準になっていることが分足データとの直接比較で判明した
+(分足の9/3木曜セッション全体がD1では"2026-09-04"、9/4金曜セッション
+全体がD1では"2026-09-07"というラベルを持っていた。土日を挟んでも
+1営業日分のズレとして一貫)。`shift_labels_to_session_start()`で、
+値は変えずラベルだけを1つ前のバー位置にシフトして補正する。
+
 【重要な前提と安全装置】
 Testing/ のキャッシュは「最後に開いた/実行したプロジェクト」の設定で
 作り直される。TimeZone=0 のプロジェクトを開くとカレンダー日区切りの
@@ -35,7 +47,7 @@ import json
 import os
 import sys
 from collections import Counter
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 
 import numpy as np
 import pandas as pd
@@ -137,6 +149,33 @@ def drop_forming_bars(df, code):
     return df.iloc[:cut], note
 
 
+def shift_labels_to_session_start(df):
+    """D1キャッシュのdate_oleは「セッション終了時点」の暦日を持っており、
+    実際のセッション開始日(ブローカー・EAのOpenTimeが使う日付、
+    reconcile_app_core.pyが1分足PKLから独自集計した日足で検証すると
+    99%超で一致する規則)より常に1営業日進んでいることが判明した
+    (2026-09-17、分足データとの直接比較で確認: 分足の9/3木曜セッション全体が
+    D1では"2026-09-04"、9/4金曜セッション全体がD1では"2026-09-07"にラベル
+    付けされていた。土日を挟んでも1営業日分のズレとして一貫している)。
+
+    値は変えず、ラベルだけを1つ前のバー位置にシフトする(D1データは既に
+    営業日のみのシーケンスなので、単純にインデックスを1つ前にずらすだけで
+    土日の扱いも自動的に正しくなる)。先頭バーの新ラベルは、元の最初の
+    ラベルから1営業日前を計算して補う。
+    """
+    dates = df["datetime"].dt.date.astype(str).tolist()
+    if len(dates) < 2:
+        return df
+    first = date.fromisoformat(dates[0])
+    prev = first - timedelta(days=1)
+    while prev.weekday() >= 5:  # 5=土, 6=日
+        prev -= timedelta(days=1)
+    new_dates = [prev.isoformat()] + dates[:-1]
+    df = df.copy()
+    df["shifted_date"] = new_dates
+    return df
+
+
 def check_broker_boundary(df, symbol):
     """直近1年に土日ラベルの日足が無いことを確認する。
 
@@ -181,14 +220,15 @@ def main():
         df, drop_note = drop_forming_bars(df, code)
         if drop_note:
             print(f"  {drop_note}")
+        df = shift_labels_to_session_start(df)
         tail = df.tail(EXPORT_BARS)
         out["pairs"][symbol] = [
-            {"date": r["datetime"].date().isoformat(),
+            {"date": r["shifted_date"],
              "open": round(float(r["open"]), 6), "high": round(float(r["high"]), 6),
              "low": round(float(r["low"]), 6), "close": round(float(r["close"]), 6)}
             for _, r in tail.iterrows()
         ]
-        print(f"  {len(tail)}本  {tail['datetime'].min().date()} 〜 {tail['datetime'].max().date()}")
+        print(f"  {len(tail)}本  {tail['shifted_date'].min()} 〜 {tail['shifted_date'].max()}")
 
     if errors:
         print("\n中止しました:")

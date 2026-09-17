@@ -39,3 +39,10 @@ FT5(EAの実機検証に使ってきたStandard Data Feed/Forexite)のOHLCが数
   (`Bars.dat` 本体[数百MB]はコミットしない、これは各自のPCにのみ存在)。
 - CHFJPY・AUDJPYのBars.datは2023年で更新が止まっている(教訓、このプロジェクト
   で以前から既知の制約)。今のところコア(GBPJPY/GBPUSD/USDJPY)のみが対象。
+- **2026-09-17追記**: 上記(History/<PAIR>/Bars.datから1分足を集計)は初期版の
+  説明で、実際の`export_daily.py`は2026-09-10以降、FT5の D1キャッシュ
+  (`Testing/<SYM>/1440/Bars.dat`)を直読みする方式に変更済み(スクリプト冒頭
+  コメント参照)。さらに2026-09-17、そのD1キャッシュ自体の日付ラベルが
+  「セッション終了日」基準で、ブローカー・EAのOpenTimeが使う「セッション
+  開始日」基準より常に1営業日進んでいることが判明し(ユーザーがブローカーの
+  チャートと見比べて発見)、`shift_labels_to_session_start()`で補正済み。

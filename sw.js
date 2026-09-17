@@ -1,6 +1,6 @@
 // Service Worker: アプリの見た目(HTML/CSS/JS/アイコン)だけをキャッシュする。
 // 為替データの取得(Twelve Data API)はキャッシュせず、常に最新を取りに行く。
-const CACHE_NAME = "rb-signal-shell-v41"; // v41: edit-bars.htmlがFT5+スクショ履歴だけを見ていてTwelve Data補完を実装していなかったため(index.htmlはacquireBars()で自動補完している)、両ページで表示が食い違う不整合があった。acquireBars/loadSettings/saveSettingsをapp.jsからsignal-core.jsへ移動して共有し、edit-bars.htmlでもAPIキーが設定されていればTwelve Dataで自動補完されるようにした(教訓90)。v40: 「過去1週間分の4本値を手動編集」ページ(edit-bars.html/edit-bars.js)を新設。
+const CACHE_NAME = "rb-signal-shell-v42"; // v42: FT5のD1キャッシュが付けている日付ラベルが、実際のセッション開始日(ブローカー・EAのOpenTime・1分足PKL集計と一致する規則)より常に1営業日進んでいたことが判明(ユーザーがブローカーのチャートと見比べて発見。分足データとの直接比較・PKLベース日足との比較の両方で確認)。ft5_export/export_daily.pyでラベルを1営業日前にシフトする修正を行い、data/ft5_daily.jsonを再生成した(アプリ側のsignal-core.js/app.js/edit-bars.jsのコードは無変更、データが正しくなるだけ)。v41: edit-bars.htmlがFT5+スクショ履歴だけを見ていてTwelve Data補完を実装していなかったため(index.htmlはacquireBars()で自動補完している)、両ページで表示が食い違う不整合があった。acquireBars/loadSettings/saveSettingsをapp.jsからsignal-core.jsへ移動して共有し、edit-bars.htmlでもAPIキーが設定されていればTwelve Dataで自動補完されるようにした(教訓90)。v40: 「過去1週間分の4本値を手動編集」ページ(edit-bars.html/edit-bars.js)を新設。
 const SHELL_FILES = [
   "./",
   "./index.html",
