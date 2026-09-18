@@ -229,6 +229,18 @@ h2 {
 
 .fetch-status.error { color: var(--negative); }
 
+/* スクショ取り込みで一部/全部のペアが保存できなかった時の警告
+   (2026-09-18、教訓100: 従来はsection-note[小さいグレー文字]だけで
+   目立たず見落とされたため、赤背景の帯で強調する) */
+.section-note.shot-warn {
+  color: var(--negative);
+  background: var(--negative-soft);
+  font-weight: 700;
+  font-size: 0.85rem;
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+
 .stack {
   display: flex;
   flex-direction: column;

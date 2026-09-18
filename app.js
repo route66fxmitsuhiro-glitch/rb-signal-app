@@ -1797,9 +1797,17 @@ function renderShotReview(rows, session) {
     <b>画面の数字と1桁ずつ見比べてください。</b>誤った値を取り込むと履歴が汚染され、
     以後の判定がずっとずれます。違っていたら取り込まずに撮り直すか、
     設定でモデルを変えて再読み取りしてください。</p>`;
+  // 2026-09-18(教訓100): 以前はNG行があっても淡いグレー文字の注記1行だけで、
+  // 見た目上は成功時と大差なく見落とされやすかった。エラーがある時は目立つ
+  // 赤帯(shot-warn)で「保存されないペアがある」ことを明示する。
+  const badCount = rows.length - okCount;
+  if (badCount > 0) {
+    h += `<p class="section-note shot-warn">⚠ ${badCount}ペアで読み取り・検査エラーがあります。
+      このペアは履歴に保存されません(下の表でNGの行)。</p>`;
+  }
   h += okCount > 0
     ? `<button class="btn btn-primary btn-small" id="rateShotCommit">OKの${okCount}ペアだけ履歴に取り込む</button>`
-    : '<p class="section-note">OKのペアが1つもないため取り込めません。</p>';
+    : '<p class="section-note shot-warn">OKのペアが1つもないため取り込めません。</p>';
   el.innerHTML = h;
   el.classList.remove("hidden");
 
@@ -1821,13 +1829,20 @@ function renderShotReview(rows, session) {
         return;
       }
       const savedNote = `${session.label} のバーを取り込みました(${Object.keys(bars).join("・")})。`;
+      if (skipped.length) {
+        // 「保存されなかったペアがある」ことは黙って通知バーに流さず、
+        // 必ずクリックで消す一手間を挟む(見落とし防止、教訓100)。
+        alert(`⚠ ${skipped.join("・")}は保存されませんでした。\n` +
+          `この日だけTwelve Data等で自動補完されます。必要なら「過去1週間分を` +
+          `手動編集」ページで後から手入力してください。`);
+      }
       const skipNote = skipped.length
-        ? `<br><b>${skipped.join("・")}は保存されていません。</b>この日だけTwelve Data等で
-           補完されるので、必要ならこのページの上にある「過去1週間分を手動編集」で
-           後から手入力してください。`
+        ? `<p class="section-note shot-warn">⚠ ${skipped.join("・")}は保存されていません。
+           この日だけTwelve Data等で補完されるので、必要ならこのページの上にある
+           「過去1週間分を手動編集」で後から手入力してください。</p>`
         : "";
-      el.innerHTML = `<p class="section-note">${savedNote}${skipNote}
-        「本日の判定を取得」を押すと、この値で判定します。</p>`;
+      el.innerHTML = `<p class="section-note">${savedNote}
+        「本日の判定を取得」を押すと、この値で判定します。</p>${skipNote}`;
     });
   }
 }
@@ -1908,7 +1923,13 @@ function initRateShotUI() {
       const session = screenshotSessionLabel();
       const pairs = await readRateShot(current.dataUrl, current.mediaType);
       const rows = buildShotRows(pairs, session.label);
-      statusEl.textContent = `読み取り完了(${pairs.length}ペアを検出)。内容を確認してください。`;
+      const badCount = rows.filter((r) => r.missing || r.check.errors.length > 0).length;
+      if (badCount > 0) {
+        statusEl.textContent = `⚠ 読み取り完了、うち${badCount}ペアでエラー。下の表を確認してください。`;
+        statusEl.classList.add("error");
+      } else {
+        statusEl.textContent = `読み取り完了(${pairs.length}ペアを検出)。内容を確認してください。`;
+      }
       renderShotReview(rows, session);
     } catch (e) {
       statusEl.textContent = `エラー: ${e.message}`;
