@@ -1766,19 +1766,24 @@ function renderShotReview(rows, session) {
 
   h += `<div class="tablewrap"><table class="tranche-table">
     <thead><tr><th>ペア</th><th>始値</th><th>高値</th><th>安値</th><th>終値</th><th>検査</th></tr></thead><tbody>`;
-  let anyError = false;
+  // 2026-09-18発見のバグ修正: 以前は5ペア中1ペアでもエラーになると、正しく
+  // 読めていた残り4ペアまで含めて「取り込む」ボタン自体が消え、その日は全ペアが
+  // 未保存のままTwelve Dataフォールバックに落ちていた(GBPJPY 2026-09-17の
+  // 高値が209.245[TD]のまま209.103[真の値]に更新されなかった実例で発覚)。
+  // 修正: エラーのないペアだけを個別に取り込み対象にする(全滅している時だけ
+  // ボタンを出さない)。
+  let okCount = 0;
   for (const r of rows) {
     if (r.missing) {
-      anyError = true;
       h += `<tr><td>${r.symbol}</td><td colspan="4">読み取れませんでした</td>
-        <td><span class="badge short">NG</span></td></tr>`;
+        <td><span class="badge short">NG(この行だけ保存されません)</span></td></tr>`;
       continue;
     }
     const d = quoteDecimals(r.symbol);
     const bad = r.check.errors.length > 0;
-    if (bad) anyError = true;
+    if (!bad) okCount++;
     const tag = bad
-      ? `<span class="badge short">NG</span> ${r.check.errors.join(" / ")}`
+      ? `<span class="badge short">NG(この行だけ保存されません)</span> ${r.check.errors.join(" / ")}`
       : r.check.warnings.length
       ? `<span class="badge warn">要確認</span> ${r.check.warnings.join(" / ")}`
       : '<span class="badge long">OK</span>';
@@ -1792,9 +1797,9 @@ function renderShotReview(rows, session) {
     <b>画面の数字と1桁ずつ見比べてください。</b>誤った値を取り込むと履歴が汚染され、
     以後の判定がずっとずれます。違っていたら取り込まずに撮り直すか、
     設定でモデルを変えて再読み取りしてください。</p>`;
-  h += anyError
-    ? '<p class="section-note">読み取れなかった、または検査に失敗したペアがあるため取り込めません。</p>'
-    : `<button class="btn btn-primary btn-small" id="rateShotCommit">この内容で履歴に取り込む</button>`;
+  h += okCount > 0
+    ? `<button class="btn btn-primary btn-small" id="rateShotCommit">OKの${okCount}ペアだけ履歴に取り込む</button>`
+    : '<p class="section-note">OKのペアが1つもないため取り込めません。</p>';
   el.innerHTML = h;
   el.classList.remove("hidden");
 
@@ -1802,12 +1807,26 @@ function renderShotReview(rows, session) {
   if (commit) {
     commit.addEventListener("click", () => {
       const bars = {};
-      for (const r of rows) bars[r.symbol] = r.bar;
+      const skipped = [];
+      for (const r of rows) {
+        if (r.missing || r.check.errors.length > 0) {
+          skipped.push(r.symbol);
+          continue;
+        }
+        bars[r.symbol] = r.bar;
+      }
+      if (!Object.keys(bars).length) return;
       if (!appendShotBars(bars)) {
         alert("履歴の保存に失敗しました(localStorageが一杯の可能性があります)");
         return;
       }
-      el.innerHTML = `<p class="section-note">${session.label} のバーを取り込みました。
+      const savedNote = `${session.label} のバーを取り込みました(${Object.keys(bars).join("・")})。`;
+      const skipNote = skipped.length
+        ? `<br><b>${skipped.join("・")}は保存されていません。</b>この日だけTwelve Data等で
+           補完されるので、必要ならこのページの上にある「過去1週間分を手動編集」で
+           後から手入力してください。`
+        : "";
+      el.innerHTML = `<p class="section-note">${savedNote}${skipNote}
         「本日の判定を取得」を押すと、この値で判定します。</p>`;
     });
   }
