@@ -25,49 +25,30 @@ const {
   aggregateWeekly,
   officialWeeks,
   computeWeeklySignal,
+  executionWindow,
+  EXEC_LEAD_MIN,
 } = SC;
 
-// --- NY 17:00 境界ウィンドウ判定(check-signals.js から移植) ---
-// FXの新しい取引日は NY 17:00(EDT=UTC 21:00 / EST=UTC 22:00)に始まる。
-// Cron が多少ずれても拾えるよう「直近に過ぎた NY 17:00 境界」の -30分〜+8時間を
-// 対象ウィンドウとし、境界の UTC 日付を一意キーに KV で重複送信を防ぐ。
-// 金曜・土曜の NY 17:00 境界(直後にセッション無し)はスキップ。
-const WINDOW_BEFORE_MIN = 30;
-const WINDOW_AFTER_MIN = 8 * 60;
-
-function nyFivePmUtcForUtcDate(y, m, d) {
-  for (const offsetHours of [4, 5]) {
-    const cand = new Date(Date.UTC(y, m, d, 17 + offsetHours, 0, 0));
-    const hh = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", hour12: false }).format(cand);
-    const dd = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(cand);
-    const wantDd = `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-    if (parseInt(hh, 10) % 24 === 17 && dd === wantDd) return cand;
-  }
-  return null;
-}
-
-function mostRecentNyBoundary(now) {
-  const horizon = new Date(now.getTime() + WINDOW_BEFORE_MIN * 60000);
-  for (let back = 0; back <= 2; back++) {
-    const probe = new Date(Date.UTC(horizon.getUTCFullYear(), horizon.getUTCMonth(), horizon.getUTCDate() - back));
-    const b = nyFivePmUtcForUtcDate(probe.getUTCFullYear(), probe.getUTCMonth(), probe.getUTCDate());
-    if (b && b.getTime() <= horizon.getTime()) return b;
-  }
-  return null;
-}
+// --- 執行ウィンドウ判定(2026-09-22に改定) ---
+// 旧実装は「NY17:00境界の -30分〜+8時間」だったため、**足が確定する前にも
+// 発火しうる**うえ、通知がロールオーバー直後(1日で最もスプレッドが広い瞬間)に
+// 届いていた。実測(GBPJPY 20〜30pips・USDJPY 約10pips、7:30で解消)に基づき、
+// **執行推奨は足の確定から90分後**(夏7:30 / 冬8:30 JST)に変更。
+// 通知はその10分前から出し、遅延に備えて確定+8時間までを対象ウィンドウとする。
+// 判定ロジックは signal-core.js の executionWindow() に集約してあり、
+// アプリ本体のバナーと同じ関数を使う(実装が2箇所に分かれて腐るのを防ぐ)。
+const WINDOW_AFTER_MIN = 8 * 60;   // 確定からの上限
 
 function evaluateWindow(now) {
-  const boundary = mostRecentNyBoundary(now);
-  if (!boundary) return { inWindow: false, reason: "NY境界の算出に失敗" };
-  const from = boundary.getTime() - WINDOW_BEFORE_MIN * 60000;
-  const to = boundary.getTime() + WINDOW_AFTER_MIN * 60000;
-  const inWindow = now.getTime() >= from && now.getTime() <= to;
-  const key = boundary.toISOString().slice(0, 10);
-  const nyWd = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "short" }).format(boundary);
-  const tradingDay = ["Sun", "Mon", "Tue", "Wed", "Thu"].includes(nyWd);
-  const offsetMin = (now.getTime() - boundary.getTime()) / 60000;
-  const reason = `now=${now.toISOString()} 直近境界=${boundary.toISOString()}(NY ${nyWd}) 経過=${offsetMin.toFixed(0)}分 inWindow=${inWindow} tradingDay=${tradingDay}`;
-  return { inWindow, boundary, key, tradingDay, reason };
+  const w = executionWindow(now);
+  if (!w) return { inWindow: false, reason: "NY境界の算出に失敗" };
+  const inWindow = w.minsFromExec >= -EXEC_LEAD_MIN && w.minsFromClose <= WINDOW_AFTER_MIN;
+  const reason = `now=${now.toISOString()} 確定=${w.close.toISOString()}`
+    + ` 執行推奨=${w.execAt.toISOString()}(JST ${w.execJst})`
+    + ` 推奨からの経過=${w.minsFromExec}分 inWindow=${inWindow} tradingDay=${w.tradingDay}`;
+  return { inWindow, boundary: w.close, key: w.key, tradingDay: w.tradingDay,
+           execJst: w.execJst, closeJst: w.closeJst,
+           minsFromExec: w.minsFromExec, reason };
 }
 
 function fmtPrice(v, symbol) {
@@ -135,8 +116,14 @@ function analysePair(pair, bars, weeklySrcBars, isFT5) {
   return { lines };
 }
 
-async function postDiscord(url, lines) {
-  const content = "📈 **RBシグナル**\n" + lines.join("\n") + "\n※自動発注はしません。手動で発注してください。";
+async function postDiscord(url, lines, win) {
+  // 執行時刻の注意書き。ロールオーバー直後に発注させないための一文。
+  const execNote = (win && win.execJst)
+    ? "\n⏰ 執行推奨 " + win.execJst + "(足の確定から90分後)。"
+      + "ロールオーバー直後はGBPJPYで20〜30pips開くので、この時刻まで待つこと。"
+    : "";
+  const content = "📈 **RBシグナル**\n" + lines.join("\n") + execNote
+    + "\n※自動発注はしません。手動で発注してください。";
   const r = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -248,7 +235,7 @@ async function runCheck(env, opts) {
     log.push(env.DISCORD_WEBHOOK_URL ? "nosend 指定" : "DISCORD_WEBHOOK_URL 未設定");
   } else {
     try {
-      sent = await postDiscord(env.DISCORD_WEBHOOK_URL, lines);
+      sent = await postDiscord(env.DISCORD_WEBHOOK_URL, lines, win);
       log.push(`discord ${sent}`);
     } catch (e) {
       log.push(`discord error: ${e.message}`);

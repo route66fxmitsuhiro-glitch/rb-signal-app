@@ -648,3 +648,15 @@ h2 {
 }
 .pair-edit-status.error { color: var(--negative); }
 .pair-edit-status.ok { color: var(--positive); }
+
+/* 執行タイミングのバナー(2026-09-22) */
+.preclose-warn.ready {
+  color: var(--text);
+  background: var(--positive-soft);
+  border-color: var(--positive);
+}
+.preclose-warn.late {
+  color: var(--text);
+  background: var(--negative-soft);
+  border-color: var(--negative);
+}

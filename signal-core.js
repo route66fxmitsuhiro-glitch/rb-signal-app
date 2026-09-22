@@ -209,6 +209,71 @@
     return off === "EDT" ? "06:00" : "07:00";
   }
 
+  // ========== 執行時刻(2026-09-22、実測スプレッドに基づく) ==========
+  // 日足の区切り(NY17:00 = JST 6:00[夏]/7:00[冬])はロールオーバーそのもので、
+  // 1日でスプレッドが最も広がる瞬間。実測は GBPJPY 20〜30pips・USDJPY 約10pips、
+  // 7:00で25%残り・7:30で解消・-30分で広がりなし。
+  // この時刻に成行で入ると23年分の利益が丸ごと消える(実機ログからの計算で
+  // profit +58,282 → -17,389)ため、**足の確定から90分後に執行する**。
+  //   夏(EDT): 6:00確定 → 7:30執行 / 冬(EST): 7:00確定 → 8:30執行
+  const EXEC_OFFSET_MIN = 90;   // 足の確定から執行までの待ち時間(分)
+  const EXEC_LEAD_MIN = 10;     // この分だけ手前から「もうすぐ」と案内する
+  const EXEC_LATE_MIN = 180;    // 執行推奨からこれを過ぎたら「遅い」と警告
+
+  // 指定した UTC 暦日の NY 17:00 を UTC の Date で返す(DST自動判定)。
+  function nyCloseUtcForUtcDate(y, m, d) {
+    for (const offsetHours of [4, 5]) {
+      const cand = new Date(Date.UTC(y, m, d, 17 + offsetHours, 0, 0));
+      const hh = new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York", hour: "2-digit", hour12: false }).format(cand);
+      const dd = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(cand);
+      const want = `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      if (parseInt(hh, 10) % 24 === 17 && dd === want) return cand;
+    }
+    return null;
+  }
+
+  // now 以前で直近の NY 17:00(=直近に確定した日足の区切り)。
+  function mostRecentNyClose(now) {
+    const t = now || new Date();
+    for (let back = 0; back <= 2; back++) {
+      const probe = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate() - back));
+      const b = nyCloseUtcForUtcDate(probe.getUTCFullYear(), probe.getUTCMonth(), probe.getUTCDate());
+      if (b && b.getTime() <= t.getTime()) return b;
+    }
+    return null;
+  }
+
+  function jstHm(date) {
+    return new Intl.DateTimeFormat("ja-JP", {
+      timeZone: "Asia/Tokyo", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
+  }
+
+  // 執行タイミングの状態。アプリのバナーと通知ワーカーが共有する。
+  //   state: "waiting"(確定済みだがまだ早い)/ "ready"(執行してよい)/ "late"(遅い)
+  function executionWindow(now) {
+    const t = now || new Date();
+    const close = mostRecentNyClose(t);
+    if (!close) return null;
+    const execAt = new Date(close.getTime() + EXEC_OFFSET_MIN * 60000);
+    const mins = Math.round((t.getTime() - execAt.getTime()) / 60000);
+    let state = "waiting";
+    if (mins >= -EXEC_LEAD_MIN) state = "ready";
+    if (mins > EXEC_LATE_MIN) state = "late";
+    // NY の曜日。金・土の区切りの直後はセッションが無いので対象外。
+    const nyWd = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York", weekday: "short" }).format(close);
+    const tradingDay = ["Sun", "Mon", "Tue", "Wed", "Thu"].includes(nyWd);
+    return {
+      close, execAt, state, tradingDay,
+      minsFromExec: mins,
+      minsFromClose: Math.round((t.getTime() - close.getTime()) / 60000),
+      closeJst: jstHm(close), execJst: jstHm(execAt),
+      key: close.toISOString().slice(0, 10),
+    };
+  }
+
   // 日付文字列を n 日ずらす。
   function shiftDate(dateStr, n) {
     const d = new Date(dateStr + "T00:00:00Z");
@@ -1201,6 +1266,12 @@
     brokerBarDate,
     formingBarDate,
     nextBarCloseJst,
+    EXEC_OFFSET_MIN,
+    EXEC_LEAD_MIN,
+    EXEC_LATE_MIN,
+    mostRecentNyClose,
+    executionWindow,
+    jstHm,
     shiftDate,
     quoteDecimals,
     reconstructBarFromQuote,

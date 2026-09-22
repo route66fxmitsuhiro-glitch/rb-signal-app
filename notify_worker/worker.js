@@ -213,6 +213,71 @@
     return off === "EDT" ? "06:00" : "07:00";
   }
 
+  // ========== 執行時刻(2026-09-22、実測スプレッドに基づく) ==========
+  // 日足の区切り(NY17:00 = JST 6:00[夏]/7:00[冬])はロールオーバーそのもので、
+  // 1日でスプレッドが最も広がる瞬間。実測は GBPJPY 20〜30pips・USDJPY 約10pips、
+  // 7:00で25%残り・7:30で解消・-30分で広がりなし。
+  // この時刻に成行で入ると23年分の利益が丸ごと消える(実機ログからの計算で
+  // profit +58,282 → -17,389)ため、**足の確定から90分後に執行する**。
+  //   夏(EDT): 6:00確定 → 7:30執行 / 冬(EST): 7:00確定 → 8:30執行
+  const EXEC_OFFSET_MIN = 90;   // 足の確定から執行までの待ち時間(分)
+  const EXEC_LEAD_MIN = 10;     // この分だけ手前から「もうすぐ」と案内する
+  const EXEC_LATE_MIN = 180;    // 執行推奨からこれを過ぎたら「遅い」と警告
+
+  // 指定した UTC 暦日の NY 17:00 を UTC の Date で返す(DST自動判定)。
+  function nyCloseUtcForUtcDate(y, m, d) {
+    for (const offsetHours of [4, 5]) {
+      const cand = new Date(Date.UTC(y, m, d, 17 + offsetHours, 0, 0));
+      const hh = new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York", hour: "2-digit", hour12: false }).format(cand);
+      const dd = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(cand);
+      const want = `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      if (parseInt(hh, 10) % 24 === 17 && dd === want) return cand;
+    }
+    return null;
+  }
+
+  // now 以前で直近の NY 17:00(=直近に確定した日足の区切り)。
+  function mostRecentNyClose(now) {
+    const t = now || new Date();
+    for (let back = 0; back <= 2; back++) {
+      const probe = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate() - back));
+      const b = nyCloseUtcForUtcDate(probe.getUTCFullYear(), probe.getUTCMonth(), probe.getUTCDate());
+      if (b && b.getTime() <= t.getTime()) return b;
+    }
+    return null;
+  }
+
+  function jstHm(date) {
+    return new Intl.DateTimeFormat("ja-JP", {
+      timeZone: "Asia/Tokyo", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
+  }
+
+  // 執行タイミングの状態。アプリのバナーと通知ワーカーが共有する。
+  //   state: "waiting"(確定済みだがまだ早い)/ "ready"(執行してよい)/ "late"(遅い)
+  function executionWindow(now) {
+    const t = now || new Date();
+    const close = mostRecentNyClose(t);
+    if (!close) return null;
+    const execAt = new Date(close.getTime() + EXEC_OFFSET_MIN * 60000);
+    const mins = Math.round((t.getTime() - execAt.getTime()) / 60000);
+    let state = "waiting";
+    if (mins >= -EXEC_LEAD_MIN) state = "ready";
+    if (mins > EXEC_LATE_MIN) state = "late";
+    // NY の曜日。金・土の区切りの直後はセッションが無いので対象外。
+    const nyWd = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York", weekday: "short" }).format(close);
+    const tradingDay = ["Sun", "Mon", "Tue", "Wed", "Thu"].includes(nyWd);
+    return {
+      close, execAt, state, tradingDay,
+      minsFromExec: mins,
+      minsFromClose: Math.round((t.getTime() - close.getTime()) / 60000),
+      closeJst: jstHm(close), execJst: jstHm(execAt),
+      key: close.toISOString().slice(0, 10),
+    };
+  }
+
   // 日付文字列を n 日ずらす。
   function shiftDate(dateStr, n) {
     const d = new Date(dateStr + "T00:00:00Z");
@@ -629,6 +694,140 @@
       }
     }
     return { errors: errors, warnings: warnings };
+  }
+
+  // ========== ユーザー設定(localStorage) ==========
+  // app.js だけでなく edit-bars.js も Twelve Data APIキーを読むために使う。
+  const LS_SETTINGS = "rbsignal_settings_v1";
+  const SETTINGS_DEFAULTS = {
+    apiKey: "", capitalJpy: 3000000, ddPct: 20, usdJpy: 150,
+    usdJpyAuto: true,       // USD/JPYレートを前日終値から自動取得する
+    usdJpyCached: null,     // 直近の取得値(セッションをまたいでロット計算に使う)
+    usdJpyCachedDate: null,
+    anthropicKey: "",       // 注文チェックのAI照合用(任意)。この端末にのみ保存。
+    visionModel: "claude-opus-5",
+  };
+
+  function loadSettings() {
+    try {
+      const raw = localStorage.getItem(LS_SETTINGS);
+      if (!raw) return Object.assign({}, SETTINGS_DEFAULTS);
+      return Object.assign({}, SETTINGS_DEFAULTS, JSON.parse(raw));
+    } catch (e) {
+      return Object.assign({}, SETTINGS_DEFAULTS);
+    }
+  }
+
+  function saveSettings(s) {
+    try {
+      localStorage.setItem(LS_SETTINGS, JSON.stringify(s));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // ========== スクショ由来(および手動編集)の日足バー履歴(localStorage) ==========
+  // app.js(スクショ取り込みUI)と edit-bars.js(過去1週間分の手動編集ページ)の
+  // 両方がこの一箇所だけを共有することで、「実装が2箇所に分散すると必ずどちらかが
+  // 腐る」という教訓(教訓90等)通りのズレを防ぐ。手動編集で直したバーも
+  // src:"shot" のまま保存する(スクショの値を人間が手で直したもの、という
+  // 位置づけで、mergeBarSeries の優先度[shot>ft5>td]に自然に乗る)。
+  const LS_BARHIST = "rb_bar_history_v1";
+  const SHOT_SYMBOLS = ["GBP/JPY", "GBP/USD", "USD/JPY", "AUD/JPY", "EUR/JPY"];
+
+  function loadBarHistory() {
+    try {
+      const raw = localStorage.getItem(LS_BARHIST);
+      const obj = raw ? JSON.parse(raw) : {};
+      return obj && typeof obj === "object" ? obj : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function saveBarHistory(h) {
+    try {
+      localStorage.setItem(LS_BARHIST, JSON.stringify(h));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // スクショ(または手動編集)由来のバーを履歴に追記する。同じ日付は上書き。
+  // bars = { "GBP/JPY": {date,open,high,low,close,src}, ... }(1シンボル分だけでもよい)
+  function appendShotBars(bars) {
+    const h = loadBarHistory();
+    for (const symbol of Object.keys(bars)) {
+      const arr = (h[symbol] || []).filter((b) => b.date !== bars[symbol].date);
+      arr.push(bars[symbol]);
+      arr.sort((a, b) => (a.date < b.date ? -1 : 1));
+      // 週足ATR14に日足75本要るので、余裕を見て200本だけ残す
+      h[symbol] = arr.slice(-200);
+    }
+    return saveBarHistory(h);
+  }
+
+  // 指定シンボル・日付のスクショ由来バーを履歴から取り除く(=FT5の値に戻す)。
+  function removeShotBar(symbol, date) {
+    const h = loadBarHistory();
+    if (!h[symbol]) return false;
+    const before = h[symbol].length;
+    h[symbol] = h[symbol].filter((b) => b.date !== date);
+    if (h[symbol].length === before) return false;
+    saveBarHistory(h);
+    return true;
+  }
+
+  // 1ペア分の日足系列を組み立てる。app.js(index.html)と edit-bars.js の両方が
+  // 使う(教訓90、二重実装の防止)。
+  //
+  // 土台 = FT5エクスポート(実機と同じ日足、GitHub Pagesから取得)
+  // 上書き = スクショ由来の履歴(ブローカー実物。localStorage)
+  // 穴埋め = Twelve Data(撮り忘れ・祝日の保険。欠けている営業日だけ)
+  //
+  // 優先度は mergeBarSeries が shot > ft5 > td で解決する。
+  // スクショで最新まで揃っていれば Twelve Data は呼ばない(APIコールの節約と、
+  // 精度の低いデータを混ぜないため)。
+  async function acquireBars(symbol, apiKey) {
+    const exp = await fetchFT5Export();
+    const ft5 = ((exp && exp.pairs && exp.pairs[symbol]) || []).map((b) =>
+      Object.assign({}, b, { src: "ft5" })
+    );
+    const shots = loadBarHistory()[symbol] || [];
+    let bars = mergeBarSeries(ft5, shots);
+
+    const target = lastCapturableSessionLabel();
+    let gaps = missingTradingDays(bars, target);
+
+    const parts = [];
+    if (ft5.length) parts.push(`FT5 ${ft5.length}本`);
+    if (shots.length) parts.push(`スクショ ${shots.length}本`);
+
+    if (gaps.length) {
+      if (!apiKey) {
+        parts.push(`⚠未取得 ${gaps.length}日(APIキー未設定で補完できません)`);
+      } else {
+        try {
+          const td = (await fetchTwelveDataDaily(symbol, apiKey))
+            .filter((b) => gaps.indexOf(b.date) >= 0)
+            .map((b) => Object.assign({}, b, { src: "td" }));
+          bars = mergeBarSeries(bars, td);
+          const still = missingTradingDays(bars, target);
+          if (td.length) parts.push(`Twelve Data補完 ${td.length}本`);
+          if (still.length) parts.push(`⚠未取得 ${still.length}日(${still.join(", ")})`);
+          gaps = still;
+        } catch (e) {
+          parts.push(`⚠Twelve Data補完に失敗(${e.message})`);
+        }
+      }
+    }
+    if (bars.length) {
+      const last = bars[bars.length - 1];
+      parts.push(`最終 ${last.date}(${{ shot: "スクショ", ft5: "FT5", td: "TD" }[last.src] || "?"})`);
+    }
+    return { bars: processDailyBars(bars, { dropForming: false }), note: parts.join(" / "), gaps: gaps };
   }
 
   // スクショを撮った時刻から、完成させるバーの日付ラベルと撮影窓の状態を返す。
@@ -1071,6 +1270,12 @@
     brokerBarDate,
     formingBarDate,
     nextBarCloseJst,
+    EXEC_OFFSET_MIN,
+    EXEC_LEAD_MIN,
+    EXEC_LATE_MIN,
+    mostRecentNyClose,
+    executionWindow,
+    jstHm,
     shiftDate,
     quoteDecimals,
     reconstructBarFromQuote,
@@ -1079,6 +1284,16 @@
     lastCapturableSessionLabel,
     mergeBarSeries,
     missingTradingDays,
+    LS_SETTINGS,
+    loadSettings,
+    saveSettings,
+    LS_BARHIST,
+    SHOT_SYMBOLS,
+    loadBarHistory,
+    saveBarHistory,
+    appendShotBars,
+    removeShotBar,
+    acquireBars,
     dowOf,
     addTradingDays,
     isDegenerateBar,
@@ -1132,49 +1347,30 @@ const {
   aggregateWeekly,
   officialWeeks,
   computeWeeklySignal,
+  executionWindow,
+  EXEC_LEAD_MIN,
 } = SC;
 
-// --- NY 17:00 境界ウィンドウ判定(check-signals.js から移植) ---
-// FXの新しい取引日は NY 17:00(EDT=UTC 21:00 / EST=UTC 22:00)に始まる。
-// Cron が多少ずれても拾えるよう「直近に過ぎた NY 17:00 境界」の -30分〜+8時間を
-// 対象ウィンドウとし、境界の UTC 日付を一意キーに KV で重複送信を防ぐ。
-// 金曜・土曜の NY 17:00 境界(直後にセッション無し)はスキップ。
-const WINDOW_BEFORE_MIN = 30;
-const WINDOW_AFTER_MIN = 8 * 60;
-
-function nyFivePmUtcForUtcDate(y, m, d) {
-  for (const offsetHours of [4, 5]) {
-    const cand = new Date(Date.UTC(y, m, d, 17 + offsetHours, 0, 0));
-    const hh = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", hour12: false }).format(cand);
-    const dd = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(cand);
-    const wantDd = `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-    if (parseInt(hh, 10) % 24 === 17 && dd === wantDd) return cand;
-  }
-  return null;
-}
-
-function mostRecentNyBoundary(now) {
-  const horizon = new Date(now.getTime() + WINDOW_BEFORE_MIN * 60000);
-  for (let back = 0; back <= 2; back++) {
-    const probe = new Date(Date.UTC(horizon.getUTCFullYear(), horizon.getUTCMonth(), horizon.getUTCDate() - back));
-    const b = nyFivePmUtcForUtcDate(probe.getUTCFullYear(), probe.getUTCMonth(), probe.getUTCDate());
-    if (b && b.getTime() <= horizon.getTime()) return b;
-  }
-  return null;
-}
+// --- 執行ウィンドウ判定(2026-09-22に改定) ---
+// 旧実装は「NY17:00境界の -30分〜+8時間」だったため、**足が確定する前にも
+// 発火しうる**うえ、通知がロールオーバー直後(1日で最もスプレッドが広い瞬間)に
+// 届いていた。実測(GBPJPY 20〜30pips・USDJPY 約10pips、7:30で解消)に基づき、
+// **執行推奨は足の確定から90分後**(夏7:30 / 冬8:30 JST)に変更。
+// 通知はその10分前から出し、遅延に備えて確定+8時間までを対象ウィンドウとする。
+// 判定ロジックは signal-core.js の executionWindow() に集約してあり、
+// アプリ本体のバナーと同じ関数を使う(実装が2箇所に分かれて腐るのを防ぐ)。
+const WINDOW_AFTER_MIN = 8 * 60;   // 確定からの上限
 
 function evaluateWindow(now) {
-  const boundary = mostRecentNyBoundary(now);
-  if (!boundary) return { inWindow: false, reason: "NY境界の算出に失敗" };
-  const from = boundary.getTime() - WINDOW_BEFORE_MIN * 60000;
-  const to = boundary.getTime() + WINDOW_AFTER_MIN * 60000;
-  const inWindow = now.getTime() >= from && now.getTime() <= to;
-  const key = boundary.toISOString().slice(0, 10);
-  const nyWd = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "short" }).format(boundary);
-  const tradingDay = ["Sun", "Mon", "Tue", "Wed", "Thu"].includes(nyWd);
-  const offsetMin = (now.getTime() - boundary.getTime()) / 60000;
-  const reason = `now=${now.toISOString()} 直近境界=${boundary.toISOString()}(NY ${nyWd}) 経過=${offsetMin.toFixed(0)}分 inWindow=${inWindow} tradingDay=${tradingDay}`;
-  return { inWindow, boundary, key, tradingDay, reason };
+  const w = executionWindow(now);
+  if (!w) return { inWindow: false, reason: "NY境界の算出に失敗" };
+  const inWindow = w.minsFromExec >= -EXEC_LEAD_MIN && w.minsFromClose <= WINDOW_AFTER_MIN;
+  const reason = `now=${now.toISOString()} 確定=${w.close.toISOString()}`
+    + ` 執行推奨=${w.execAt.toISOString()}(JST ${w.execJst})`
+    + ` 推奨からの経過=${w.minsFromExec}分 inWindow=${inWindow} tradingDay=${w.tradingDay}`;
+  return { inWindow, boundary: w.close, key: w.key, tradingDay: w.tradingDay,
+           execJst: w.execJst, closeJst: w.closeJst,
+           minsFromExec: w.minsFromExec, reason };
 }
 
 function fmtPrice(v, symbol) {
@@ -1242,8 +1438,14 @@ function analysePair(pair, bars, weeklySrcBars, isFT5) {
   return { lines };
 }
 
-async function postDiscord(url, lines) {
-  const content = "📈 **RBシグナル**\n" + lines.join("\n") + "\n※自動発注はしません。手動で発注してください。";
+async function postDiscord(url, lines, win) {
+  // 執行時刻の注意書き。ロールオーバー直後に発注させないための一文。
+  const execNote = (win && win.execJst)
+    ? "\n⏰ 執行推奨 " + win.execJst + "(足の確定から90分後)。"
+      + "ロールオーバー直後はGBPJPYで20〜30pips開くので、この時刻まで待つこと。"
+    : "";
+  const content = "📈 **RBシグナル**\n" + lines.join("\n") + execNote
+    + "\n※自動発注はしません。手動で発注してください。";
   const r = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1355,7 +1557,7 @@ async function runCheck(env, opts) {
     log.push(env.DISCORD_WEBHOOK_URL ? "nosend 指定" : "DISCORD_WEBHOOK_URL 未設定");
   } else {
     try {
-      sent = await postDiscord(env.DISCORD_WEBHOOK_URL, lines);
+      sent = await postDiscord(env.DISCORD_WEBHOOK_URL, lines, win);
       log.push(`discord ${sent}`);
     } catch (e) {
       log.push(`discord error: ${e.message}`);

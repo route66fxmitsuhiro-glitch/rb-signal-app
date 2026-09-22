@@ -19,6 +19,7 @@ const {
   weekKeyOf,
   todayStr,
   nextBarCloseJst,
+  executionWindow,
   dowOf,
   addTradingDays,
   fetchRawDailyValuesAuto,
@@ -618,6 +619,40 @@ function renderSatelliteBlock(sig, symbol) {
     }
   `;
   return h;
+}
+
+// ========== 執行タイミングのバナー ==========
+// 日足の区切り(NY17:00 = JST 6:00[夏]/7:00[冬])はロールオーバーで、1日で
+// 最もスプレッドが広がる瞬間。実測で GBPJPY 20〜30pips・USDJPY 約10pips。
+// ここで成行を出すと23年分の利益が丸ごと消える計算なので、確定から90分待つ。
+function renderExecBanner() {
+  const el = document.getElementById("preCloseWarn");
+  if (!el) return;
+  const w = executionWindow();
+  if (!w) { el.classList.add("hidden"); return; }
+  el.classList.remove("hidden", "ready", "late");
+
+  const mins = Math.abs(w.minsFromExec);
+  const hm = (m) => (m >= 60 ? `${Math.floor(m / 60)}時間${m % 60}分` : `${m}分`);
+
+  if (!w.tradingDay) {
+    el.textContent = `いまは週末(直近の区切りの後にセッションがありません)。次の取引日の ${w.execJst} が執行時刻です。`;
+    return;
+  }
+  if (w.state === "waiting") {
+    el.innerHTML = `<strong>まだ発注しないでください。</strong>`
+      + ` 日足は ${w.closeJst} に確定済みですが、いまはロールオーバー直後で`
+      + `スプレッドが最も広がっている時間帯です(GBPJPY 20〜30pips)。`
+      + `<br>執行推奨は <strong>${w.execJst}</strong> — あと ${hm(mins)}。`;
+  } else if (w.state === "ready") {
+    el.classList.add("ready");
+    el.innerHTML = `<strong>いま執行してよい時間帯です</strong>(推奨 ${w.execJst}、`
+      + `確定から ${hm(Math.abs(w.minsFromClose))}経過)。スプレッドは通常幅に戻っています。`;
+  } else {
+    el.classList.add("late");
+    el.innerHTML = `<strong>執行推奨時刻から ${hm(mins)} 経過しています。</strong>`
+      + ` 推奨は ${w.execJst}。遅れるほど初動を取り逃します(90分の遅れで約-25%)。`;
+  }
 }
 
 function renderSignals(results) {
@@ -2042,8 +2077,7 @@ async function fetchAndRender() {
     statusEl.textContent =
       `取得完了(${new Date().toLocaleString("ja-JP")}) — 次の日足確定 ${nextBarCloseJst()} JST — ` +
       sourceNotes.join(" / ");
-    const warnEl = document.getElementById("preCloseWarn");
-    if (warnEl) warnEl.classList.add("hidden");
+    renderExecBanner();
   } catch (e) {
     statusEl.textContent = `エラー: ${e.message}`;
     statusEl.classList.add("error");
@@ -2154,6 +2188,8 @@ function init() {
   initOrderShotUI();
   initRateShotUI();
   renderPositions(null);
+  renderExecBanner();
+  setInterval(renderExecBanner, 60000);   // 執行時刻までの残り時間を毎分更新
 
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("./sw.js").catch(() => {});
