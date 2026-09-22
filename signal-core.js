@@ -2,7 +2,7 @@
 /*
  * RBシグナル・コアロジック(共通モジュール)
  *
- * app.js(ブラウザPWA)と notify/check-signals.js(GitHub Actions通知バッチ)の
+ * app.js(本体)と edit-bars.js(4本値の手動編集ページ)の
  * 両方から読み込まれる、純粋な判定ロジックだけを集めたモジュール。ロジックを
  * 2箇所に別々実装すると、片方だけ直してもう片方が古いままズレる事故が
  * 起きやすい(教訓: 「実データ再重み付け」等で繰り返し確認された「実装が
@@ -250,7 +250,7 @@
       timeZone: "Asia/Tokyo", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
   }
 
-  // 執行タイミングの状態。アプリのバナーと通知ワーカーが共有する。
+  // 執行タイミングの状態。画面上部のバナーが使う。
   //   state: "waiting"(確定済みだがまだ早い)/ "ready"(執行してよい)/ "late"(遅い)
   function executionWindow(now) {
     const t = now || new Date();

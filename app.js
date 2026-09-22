@@ -9,9 +9,9 @@
  */
 
 // ========== 共通ロジック(signal-core.js)からの読み込み ==========
-// シグナル判定の純粋ロジックは signal-core.js に集約し、通知バッチ
-// (notify/check-signals.js)と共有している。ここでは分割代入で必要な
-// 関数・定数を取り出すだけにし、二重実装によるロジックのズレを防ぐ。
+// シグナル判定の純粋ロジックは signal-core.js に集約し、手動編集ページ
+// (edit-bars.js)と共有している。ここでは分割代入で必要な関数・定数を
+// 取り出すだけにし、二重実装によるロジックのズレを防ぐ。
 const {
   PAIRS,
   ALL_PAIRS,
@@ -2174,8 +2174,10 @@ function initSettingsUI() {
   });
 }
 
-// 通知は Cloudflare Worker(notify_worker/)が判定し Discord Webhook へ送る。
-// アプリ側は通知に関与しない(旧 Web Push 実装は 2026-09-04 に撤去)。
+// 自動通知は持たない(2026-09-23に廃止)。Web Push → GitHub Actions →
+// Cloudflare Worker + Discord と3度作り替えたが、どれも「判定に使うデータが
+// アプリ側(端末のlocalStorage)にしか無い」という構造上、通知とアプリの判定が
+// 食い違う問題を解決できなかった。執行時刻は画面上部のバナーが常時示す。
 
 function init() {
   applyTheme();
