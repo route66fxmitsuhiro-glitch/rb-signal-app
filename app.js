@@ -3,7 +3,7 @@
  * RBシグナル(コア版)
  * 日足RideThin(5トランシェ)+週足ドンチャン(3階層)のシグナル判定・
  * ロット計算・保有トランシェの目標/撤退ライン管理を行う。
- * 分散レイヤー9層(2026-09-04〜)・衝突ゲート(2026-09-11〜)を実装済み。
+ * 分散レイヤー11層(2026-09-04〜、ピンバー2層は2026-09-24〜)・衝突ゲート(2026-09-11〜)を実装済み。
  * rideサーキットブレーカーは未実装(現行ロット構成では日足/週足ともロット下限に
  * 張り付いていて実質休眠中のため、優先度低)。
  */
@@ -209,11 +209,15 @@ function buildPositionRecord(pairLabel, symbol, timeframe, direction, entryPrice
 // このアプリはEAの内部状態を持たないため、ユーザーが記録済みの未決済ポジション
 // (isSatellite=true のもの)で代用判定する。excludeLayer は今まさに判定中の
 // レイヤー自身(hasOpenSatellite()により通常は未保有のはずだが念のため除外)。
+// ピンバー反転(noConflict)の層は衝突ゲートに参加しないので、数える対象から外す。
+const NO_CONFLICT_LAYERS = new Set(SATELLITES.filter((s) => s.noConflict).map((s) => s.id));
+
 function openSatelliteDirections(pair, excludeLayer) {
   return state.positions
     .filter(
       (p) =>
         p.isSatellite &&
+        !NO_CONFLICT_LAYERS.has(p.kind) &&
         p.pair === pair &&
         p.kind !== excludeLayer &&
         p.tranches.some((t) => !t.closed)
@@ -226,8 +230,9 @@ function openSatelliteDirections(pair, excludeLayer) {
 // 必ず同じ値を使うよう、ここに1箇所だけ実装する(教訓: 実装が2箇所に分散すると
 // 必ずどちらかが腐る)。
 function satelliteLot(sig, scale) {
-  const openDirs = openSatelliteDirections(sig.pair, sig.layer);
-  const mult = satelliteConflictMult(sig.pair, sig.direction, openDirs);
+  // noConflict の層(ピンバー)は衝突ゲートを使わない(EAと同じ)
+  const openDirs = sig.noConflict ? [] : openSatelliteDirections(sig.pair, sig.layer);
+  const mult = sig.noConflict ? 1.0 : satelliteConflictMult(sig.pair, sig.direction, openDirs);
   return { lot: roundLot(sig.lot * scale * mult), mult, openDirs };
 }
 
@@ -517,6 +522,15 @@ function satelliteEvidence(sig, symbol) {
       前日(${b1.date})が極値${sig.day1Extreme != null ? p(sig.day1Extreme) : "-"}を
       ${sig.extended ? "更新した(伸びた → 見送り)" : "更新できなかった(伸び悩み → フェード)"}`;
   }
+  if (sig.kind === "pinbar") {
+    if (sig.pinTooNarrow) {
+      return `前日(${b1.date}) 高${p(b1.high)}/安${p(b1.low)} — 値幅がATR14の25%未満で対象外`;
+    }
+    const pc = (v) => (v * 100).toFixed(0) + "%";
+    return `前日(${b1.date}、${body}) 上ヒゲ${pc(sig.upWick)} / 下ヒゲ${pc(sig.dnWick)} /
+      終値の位置 ${pc(sig.closePosRatio)}(下端0%〜上端100%) —
+      条件: ヒゲ${pc(sig.wickTh)}以上かつ終値がヒゲと反対側の${pc(sig.closePosTh)}以内`;
+  }
   if (sig.kind === "weekly_streak_rev") {
     return `直近${sig.streakN}週: ${sig.allUp ? "全て陽線 → フェードでショート" :
       sig.allDown ? "全て陰線 → フェードでロング" : "連続していない"}
@@ -534,6 +548,7 @@ function satelliteNoSignalReason(sig) {
     if (sig.kind === "weekly_streak_rev") return `直近${sig.streakN}週が同じ向きに連続していない`;
     if (sig.kind === "range_fade") return "失敗ブレイクが成立していない";
     if (sig.kind === "day2_fail") return "day-1の確定ブレイク or day-2の伸び悩みが成立していない";
+    if (sig.kind === "pinbar") return sig.pinTooNarrow ? "前日の値幅が小さすぎる" : "前日がピンバーではない";
     return "条件が成立していない";
   }
   if (sig.weekly && !sig.newWeek) return "新しい週の確定日ではない(EAは週の変わり目だけ新規判定する)";

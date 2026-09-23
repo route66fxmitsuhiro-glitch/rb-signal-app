@@ -54,19 +54,19 @@
       gate: "low", erThreshold: 0.147, lookback: 7, stopMult: 2.0, holdDays: 10, lot: 0.06 },
     { id: "gbp-streak", label: "GBPJPYstreak", symbol: "GBP/JPY", pair: "GBPJPY",
       kind: "streak_rev", title: "ストリーク逆張り",
-      gate: "low", erThreshold: 0.147, n: 3, stopMult: 2.0, holdDays: 3, lot: 0.02 },
+      gate: "low", erThreshold: 0.147, n: 3, stopMult: 2.0, holdDays: 3, lot: 0.04 },
     { id: "usd-outside", label: "USDOutside", symbol: "USD/JPY", pair: "USDJPY",
       kind: "outside_cont", title: "アウトサイドデイ継続",
-      gate: "high", erThreshold: 0.16, stopMult: 2.25, holdDays: 5, lot: 0.18 },
+      gate: "high", erThreshold: 0.16, stopMult: 2.25, holdDays: 5, lot: 0.12 },
     { id: "usd-streak", label: "USDJPYstreak", symbol: "USD/JPY", pair: "USDJPY",
       kind: "streak_rev", title: "ストリーク逆張り",
       gate: "none", n: 3, stopMult: 2.5, holdDays: 5, lot: 0.04 },
     { id: "usd-wstreak", label: "USDWeeklyStreak", symbol: "USD/JPY", pair: "USDJPY",
       kind: "weekly_streak_rev", title: "週足ストリーク逆張り",
-      gate: "low", erThreshold: 0.229, n: 2, stopMult: 2.0, holdWeeks: 6, lot: 0.09 },
+      gate: "low", erThreshold: 0.229, n: 2, stopMult: 2.0, holdWeeks: 6, lot: 0.20 },
     { id: "aud-outside", label: "AUDoutside", symbol: "AUD/JPY", pair: "AUDJPY",
       kind: "outside_cont", title: "アウトサイドデイ継続",
-      gate: "high", erThreshold: 0.18, stopMult: 1.0, holdDays: 5, lot: 0.18 },
+      gate: "high", erThreshold: 0.18, stopMult: 1.0, holdDays: 5, lot: 0.22 },
     { id: "aud-day2", label: "AUDday2fail", symbol: "AUD/JPY", pair: "AUDJPY",
       kind: "day2_fail", title: "day-2ブレイク失敗フェード",
       gate: "high", erThreshold: 0.18, lookback: 15, stopMult: 1.5, holdDays: 7, lot: 0.18 },
@@ -77,6 +77,14 @@
     { id: "ej-fadeout", label: "EURJPYfadeOut", symbol: "EUR/JPY", pair: "EURJPY",
       kind: "outside_fade", title: "アウトサイドデイ・フェード",
       gate: "low", erThreshold: 0.229, stopMult: 1.0, holdDays: 5, lot: 0.135 },
+    // ピンバー反転(2026-09-23、Exec730v4で追加・実機確認済み)。
+    // noConflict: EAでは衝突ゲートに参加しない(数えもしないし、数えられもしない)。
+    { id: "gj-pinbar", label: "GBPJPYpinbar", symbol: "GBP/JPY", pair: "GBPJPY",
+      kind: "pinbar", title: "ピンバー反転", noConflict: true,
+      gate: "high", erThreshold: 0.18, wick: 0.6, closePos: 0.33, stopMult: 1.5, holdDays: 7, lot: 0.03 },
+    { id: "gu-pinbar", label: "GBPUSDpinbar", symbol: "GBP/USD", pair: "GBPUSD",
+      kind: "pinbar", title: "ピンバー反転", noConflict: true,
+      gate: "high", erThreshold: 0.229, wick: 0.6, closePos: 0.33, stopMult: 2.5, holdDays: 5, lot: 0.03 },
   ];
 
   // ========== 衝突ゲート(RB_Broker_Conflict.dll の確定パラメータ、2026-09-11) ==========
@@ -1033,6 +1041,35 @@
       return { direction: day1Up ? "short" : "long", detail: detail };
     }
 
+    if (cfg.kind === "pinbar") {
+      // EA(Exec730v4 RunPinSignal): 前日の値幅がATR14の25%未満なら無視。
+      // 下ヒゲ比≥wick かつ終値が上側closePos以内 → ロング、
+      // 上ヒゲ比≥wick かつ終値が下側closePos以内 → ショート(両方成立は相殺)
+      const r = computeATR14(bars);
+      const rng = b1.high - b1.low;
+      detail.pinRange = rng;
+      if (!(r > 0) || rng <= 0 || rng < 0.25 * r) {
+        detail.pinTooNarrow = true;
+        return { direction: null, detail: detail };
+      }
+      const bodyHi = Math.max(b1.open, b1.close);
+      const bodyLo = Math.min(b1.open, b1.close);
+      const upWick = (b1.high - bodyHi) / rng;
+      const dnWick = (bodyLo - b1.low) / rng;
+      const pos = (b1.close - b1.low) / rng;
+      detail.upWick = upWick;
+      detail.dnWick = dnWick;
+      detail.closePosRatio = pos;
+      detail.wickTh = cfg.wick;
+      detail.closePosTh = cfg.closePos;
+      let side = 0;
+      if (dnWick >= cfg.wick && pos > 1.0 - cfg.closePos) side += 1;
+      if (upWick >= cfg.wick && pos < cfg.closePos) side -= 1;
+      if (side > 0) return { direction: "long", detail: detail };
+      if (side < 0) return { direction: "short", detail: detail };
+      return { direction: null, detail: detail };
+    }
+
     return { direction: null, detail: detail };
   }
 
@@ -1103,6 +1140,7 @@
       layer: cfg.id, label: cfg.label, symbol: cfg.symbol, title: cfg.title,
       kind: cfg.kind, pair: cfg.pair, gate: cfg.gate, erThreshold: cfg.erThreshold,
       lot: cfg.lot, stopMult: cfg.stopMult, holdDays: cfg.holdDays, weekly: false,
+      noConflict: !!cfg.noConflict,
     };
     const need = Math.max(16, (cfg.lookback || 0) + 4, (cfg.n || 0) + 2);
     if (!bars || bars.length < need) {
