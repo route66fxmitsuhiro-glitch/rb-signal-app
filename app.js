@@ -443,10 +443,19 @@ function renderWeeklyPreview(previewSignal, symbol) {
 // 「シグナルなし」と誤表示される事例が実際に発生した。missingTradingDays自体は
 // 修正済みだが(Twelve Dataキー未設定時など)なお穴が残る場合に備え、
 // computeDailySignalの結果を表示する時点でも二重に警告する。
+// 日付(YYYY-MM-DD)を画面表示用の mm/dd(曜) にする。
+// 「前日」「前々日」だとどの日が起点か分かりにくいため(2026-09-24、ユーザー要望)。
+const DOW_JA = ["日", "月", "火", "水", "木", "金", "土"];
+function fmtDay(dateStr) {
+  if (!dateStr) return "-";
+  const [, m, d] = dateStr.split("-");
+  return `${m}/${d}(${DOW_JA[dowOf(dateStr)]})`;
+}
+
 function dateGapNote(dsig) {
   if (!dsig || !dsig.dateGap || !dsig.prevBar || !dsig.prevPrevBar) return "";
   return `<p class="section-note" style="color:#c00;font-weight:bold;">
-    ⚠️ 前々日(${dsig.prevPrevBar.date})と前日(${dsig.prevBar.date})の間の営業日のデータが
+    ⚠️ ${fmtDay(dsig.prevPrevBar.date)}と${fmtDay(dsig.prevBar.date)}の間の営業日のデータが
     欠落しており、抜けた日の値動きを見ずに判定しています。この日足判定(シグナルの
     有無・方向とも)は信用できません。ブローカーのレート一覧スクショで抜けている日を
     取り込んでから、「本日の判定を取得」を押し直してください。</p>`;
@@ -467,21 +476,21 @@ function sundayNote(dsig, dataSourceNote) {
   const prevIsSun = dowOf(dsig.prevBar.date) === 0;
   const prevPrevIsSun = dowOf(dsig.prevPrevBar.date) === 0;
   if (prevIsSun) {
-    return `<p class="section-note">⚠️ 月曜のエントリー候補です。判定に使う「前日」(${dsig.prevBar.date})は
+    return `<p class="section-note">⚠️ 月曜のエントリー候補です。判定に使う${fmtDay(dsig.prevBar.date)}の足は
       市場再開直後の薄商いバーで、通常のブローカーのチャートには表示されません。ただし月曜エントリーは
       実績上、全体成績への寄与が小さく(過去統計で全体pipsの約4%)、勝率も全曜日中最弱(約43%)です。
       この時間帯に対応できないなら見送っても大きな機会損失にはなりません。</p>`;
   }
   if (prevPrevIsSun) {
     if (isFT5) {
-      return `<p class="section-note">⚠️ 火曜のエントリー候補です。判定に使う「前々日」(${dsig.prevPrevBar.date})が
-        市場再開直後の薄商いバーのため、ご自身のブローカーのチャートで前日・前々日を見比べても再現できません。
+      return `<p class="section-note">⚠️ 火曜のエントリー候補です。判定に使う${fmtDay(dsig.prevPrevBar.date)}の足が
+        市場再開直後の薄商いバーのため、ご自身のブローカーのチャートで2日分を見比べても再現できません。
         チャートの見た目と食い違って見えても、このアプリの判定を採用してください
         (過去統計でこの曜日のエントリーが全曜日中最大の寄与・良好な勝率を記録しています。
         データソースはFT5=EAの実機検証と同一データのため、この判定の信頼度は高いです)。</p>`;
     }
     return `<p class="section-note">🔴 火曜のエントリー候補です。ただし現在の判定は<strong>Twelve Data(フォールバック中)</strong>
-      によるもので、判定根拠(前々日=市場再開直後の薄商いバー)はTwelve DataとFT5(EAの実機データ)で
+      によるもので、判定根拠(${fmtDay(dsig.prevPrevBar.date)}=市場再開直後の薄商いバー)はTwelve DataとFT5(EAの実機データ)で
       数〜十数pips食い違いやすく、この曜日の判定一致率は実測で約3〜6割にとどまります(水木金は問題ありません)。
       火曜は全曜日中最大の寄与(約32%)がある反面、今この判定はいつもより不確実です。
       可能ならFT5のデータを更新・エクスポートしてから確認するか、ブローカーの短い時間軸チャートで
@@ -501,33 +510,33 @@ function satelliteEvidence(sig, symbol) {
     : "";
 
   if (sig.kind === "outside_cont" || sig.kind === "outside_fade") {
-    return `前々日 高${p(b2.high)}/安${p(b2.low)} → 前日 高${p(b1.high)}/安${p(b1.low)}
-      (${b1.date}、${body}) / アウトサイドデイ: ${sig.outside ? "○(高安とも更新)" : "×"}`;
+    return `${fmtDay(b2.date)} 高${p(b2.high)}/安${p(b2.low)} → ${fmtDay(b1.date)} 高${p(b1.high)}/安${p(b1.low)}
+      (${body}) / アウトサイドデイ: ${sig.outside ? "○(高安とも更新)" : "×"}`;
   }
   if (sig.kind === "streak_rev") {
     return `直近${sig.streakN}日: ${sig.allUp ? "全て陽線 → フェードでショート" :
       sig.allDown ? "全て陰線 → フェードでロング" : "連続していない"}
-      (前日 ${b1.date}、${body})`;
+      (直近 ${fmtDay(b1.date)}、${body})`;
   }
   if (sig.kind === "range_fade") {
     return `直近レンジ 高${p(sig.rollHigh)}/安${p(sig.rollLow)} に対し
-      前日 高${p(b1.high)}/安${p(b1.low)}/終${p(b1.close)}(${b1.date}) /
+      ${fmtDay(b1.date)} 高${p(b1.high)}/安${p(b1.low)}/終${p(b1.close)} /
       失敗ブレイク: ${sig.failedUp ? "上抜け失敗 → ショート" :
         sig.failedDown ? "下抜け失敗 → ロング" : "なし"}`;
   }
   if (sig.kind === "day2_fail") {
     const d1 = sig.day1Up ? "上抜け" : sig.day1Down ? "下抜け" : "なし";
-    return `前々日(${b2.date})が直近レンジ 高${p(sig.rollHigh)}/安${p(sig.rollLow)} を
+    return `${fmtDay(b2.date)}が直近レンジ 高${p(sig.rollHigh)}/安${p(sig.rollLow)} を
       終値${p(b2.close)}で確定ブレイク: ${d1} /
-      前日(${b1.date})が極値${sig.day1Extreme != null ? p(sig.day1Extreme) : "-"}を
+      ${fmtDay(b1.date)}が極値${sig.day1Extreme != null ? p(sig.day1Extreme) : "-"}を
       ${sig.extended ? "更新した(伸びた → 見送り)" : "更新できなかった(伸び悩み → フェード)"}`;
   }
   if (sig.kind === "pinbar") {
     if (sig.pinTooNarrow) {
-      return `前日(${b1.date}) 高${p(b1.high)}/安${p(b1.low)} — 値幅がATR14の25%未満で対象外`;
+      return `${fmtDay(b1.date)} 高${p(b1.high)}/安${p(b1.low)} — 値幅がATR14の25%未満で対象外`;
     }
     const pc = (v) => (v * 100).toFixed(0) + "%";
-    return `前日(${b1.date}、${body}) 上ヒゲ${pc(sig.upWick)} / 下ヒゲ${pc(sig.dnWick)} /
+    return `${fmtDay(b1.date)}(${body}) 上ヒゲ${pc(sig.upWick)} / 下ヒゲ${pc(sig.dnWick)} /
       終値の位置 ${pc(sig.closePosRatio)}(下端0%〜上端100%) —
       条件: ヒゲ${pc(sig.wickTh)}以上かつ終値がヒゲと反対側の${pc(sig.closePosTh)}以内`;
   }
@@ -540,15 +549,16 @@ function satelliteEvidence(sig, symbol) {
 }
 
 function satelliteNoSignalReason(sig) {
+  const d1 = sig.prevBar ? fmtDay(sig.prevBar.date) : "直近の足";
   if (!sig.rawDirection) {
     if (sig.kind === "outside_cont" || sig.kind === "outside_fade") {
-      return sig.outside ? "前日の実体がない(始値=終値)" : "前日がアウトサイドデイではない";
+      return sig.outside ? `${d1}の実体がない(始値=終値)` : `${d1}がアウトサイドデイではない`;
     }
     if (sig.kind === "streak_rev") return `直近${sig.streakN}日が同じ向きに連続していない`;
     if (sig.kind === "weekly_streak_rev") return `直近${sig.streakN}週が同じ向きに連続していない`;
     if (sig.kind === "range_fade") return "失敗ブレイクが成立していない";
     if (sig.kind === "day2_fail") return "day-1の確定ブレイク or day-2の伸び悩みが成立していない";
-    if (sig.kind === "pinbar") return sig.pinTooNarrow ? "前日の値幅が小さすぎる" : "前日がピンバーではない";
+    if (sig.kind === "pinbar") return sig.pinTooNarrow ? `${d1}の値幅が小さすぎる` : `${d1}がピンバーではない`;
     return "条件が成立していない";
   }
   if (sig.weekly && !sig.newWeek) return "新しい週の確定日ではない(EAは週の変わり目だけ新規判定する)";
@@ -682,10 +692,9 @@ function renderSignals(results) {
     const card = document.createElement("div");
     card.className = "pair-card";
 
-    const srcBadge = r.dataSourceNote
-      ? `<span class="badge ${r.dataSourceNote.startsWith("FT5") ? "ok" : "warn"}">${r.dataSourceNote}</span>`
-      : "";
-    let html = `<div class="pair-head"><span class="pair-name">${r.label}</span>${srcBadge}</div>`;
+    // 取得元(FT5○本/スクショ○本…)のバッジは表示しない(2026-09-24、ユーザー要望)。
+    // r.dataSourceNote は火曜の注記の出し分けに内部で使うので保持している。
+    let html = `<div class="pair-head"><span class="pair-name">${r.label}</span></div>`;
 
     // --- 日足 ---
     const dsig = r.daily.signal;
@@ -699,13 +708,13 @@ function renderSignals(results) {
       html += `
         <div class="pair-meta">
           <span class="badge ${badge}">日足 ${dsig.direction === "long" ? "ロング" : "ショート"}</span>
-          ${dsig.outside ? '<span class="badge warn">アウトサイド(前日終値で一本化)</span>' : ""}
+          ${dsig.outside ? '<span class="badge warn">アウトサイド(終値の陽線/陰線で一本化)</span>' : ""}
           ${alreadyOpen ? '<span class="badge warn">既に保有中(EAは新規建てしない)</span>' : ""}
           ATR14=${fmtPrice(r.daily.atr14, r.symbol)} (R)
         </div>
         <div class="pair-meta">
-          判定根拠: 前々日 高${fmtPrice(dsig.prevPrevBar.high, r.symbol)}/安${fmtPrice(dsig.prevPrevBar.low, r.symbol)}
-          → 前日 高${fmtPrice(dsig.prevBar.high, r.symbol)}/安${fmtPrice(dsig.prevBar.low, r.symbol)}(${dsig.prevBar.date}、
+          判定根拠: ${fmtDay(dsig.prevPrevBar.date)} 高${fmtPrice(dsig.prevPrevBar.high, r.symbol)}/安${fmtPrice(dsig.prevPrevBar.low, r.symbol)}
+          → ${fmtDay(dsig.prevBar.date)} 高${fmtPrice(dsig.prevBar.high, r.symbol)}/安${fmtPrice(dsig.prevBar.low, r.symbol)}(
           ${dsig.prevBar.close >= dsig.prevBar.open ? "陽線" : "陰線"})
         </div>
         ${dateGapNote(dsig)}
@@ -742,8 +751,8 @@ function renderSignals(results) {
           日足: <span class="badge none">本日シグナルなし</span>
         </div>
         <div class="pair-meta">
-          判定根拠: 前々日 高${fmtPrice(dsig.prevPrevBar.high, r.symbol)}/安${fmtPrice(dsig.prevPrevBar.low, r.symbol)}
-          → 前日 高${fmtPrice(dsig.prevBar.high, r.symbol)}/安${fmtPrice(dsig.prevBar.low, r.symbol)}(${dsig.prevBar.date}、
+          判定根拠: ${fmtDay(dsig.prevPrevBar.date)} 高${fmtPrice(dsig.prevPrevBar.high, r.symbol)}/安${fmtPrice(dsig.prevPrevBar.low, r.symbol)}
+          → ${fmtDay(dsig.prevBar.date)} 高${fmtPrice(dsig.prevBar.high, r.symbol)}/安${fmtPrice(dsig.prevBar.low, r.symbol)}(
           高値更新: ${dsig.brokeHigh ? "○" : "×"} / 安値更新: ${dsig.brokeLow ? "○" : "×"})
         </div>
         ${dateGapNote(dsig)}
@@ -2090,8 +2099,7 @@ async function fetchAndRender() {
     // FT5エクスポートのバーは常に確定済みなので「形成中バーを完成扱いする」
     // 旧バグの余地は無い。代わりに、次の確定時刻を案内として出す。
     statusEl.textContent =
-      `取得完了(${new Date().toLocaleString("ja-JP")}) — 次の日足確定 ${nextBarCloseJst()} JST — ` +
-      sourceNotes.join(" / ");
+      `取得完了(${new Date().toLocaleString("ja-JP")}) — 次の日足確定 ${nextBarCloseJst()} JST`;
     renderExecBanner();
   } catch (e) {
     statusEl.textContent = `エラー: ${e.message}`;
