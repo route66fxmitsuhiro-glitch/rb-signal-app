@@ -98,7 +98,12 @@ const BASE_LOT_WEEKLY = 0.10;  // バックテスト基準ロット(1ペアあ�
 // 差の大半はブローカー時間移行による影響であり、トランシェ配分変更[ステージ4]
 // 単体の寄与は限定的と見られる)。この更新により、同じDD許容額に対する
 // 計算ロットは従来より大きくなる点に注意。
-const REFERENCE_MAX_DD_USD = 1968.15;
+// 【2026-09-24更新】上の説明は「コア単体・6:00執行」時代のもの。アプリは今コア+衛星11層
+// (EA最終版 Exec730v5 と同じ構成)を出しているので、基準も v5 全体の最大DDにする:
+// 実機ログ(USDOutsideLotSize0.12 = v5相当)に実測スプレッドを課した後の最大DD 3,024 USD
+// (2008-03〜2008-10、conflictaware/aplus/forward_reference_v5.py で算出)。
+// 旧値1,968.15のままだと、表示ロットがDD許容額に対して約1.54倍大きく出ていた。
+const REFERENCE_MAX_DD_USD = 3024;
 
 // ========== ローカルストレージ ==========
 // LS_SETTINGS / loadSettings / saveSettings は signal-core.js に集約
