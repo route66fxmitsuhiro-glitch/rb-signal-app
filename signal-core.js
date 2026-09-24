@@ -722,6 +722,40 @@
     }
   }
 
+  // ========== フォワード記録: アプリが「この日エントリーせよ」と出したシグナルの記録 ==========
+  // 2026-09-24導入。画面に「このシグナルを記録」ボタンが出たもの(=EAなら建てる場面)を
+  // 1日1件ずつ残し、forward.html で「出したシグナルのうち実際に建てた割合」を数えるのに使う。
+  // key = 判定に使った足|レイヤー|ペア|方向。同じシグナルを何度「取得」しても1件だけ残る。
+  const LS_SIGNALLOG = "rbsignal_signal_log_v1";
+
+  function loadSignalLog() {
+    try {
+      const raw = localStorage.getItem(LS_SIGNALLOG);
+      return raw ? JSON.parse(raw) : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function appendSignalLog(entries) {
+    const list = loadSignalLog();
+    const seen = new Set(list.map((e) => e.key));
+    let added = 0;
+    for (const e of entries) {
+      if (seen.has(e.key)) continue;
+      list.push(e);
+      seen.add(e.key);
+      added++;
+    }
+    if (!added) return 0;
+    try {
+      localStorage.setItem(LS_SIGNALLOG, JSON.stringify(list));
+    } catch (e) {
+      return -1;
+    }
+    return added;
+  }
+
   function saveSettings(s) {
     try {
       localStorage.setItem(LS_SETTINGS, JSON.stringify(s));
@@ -1321,6 +1355,9 @@
     LS_SETTINGS,
     loadSettings,
     saveSettings,
+    LS_SIGNALLOG,
+    loadSignalLog,
+    appendSignalLog,
     LS_BARHIST,
     SHOT_SYMBOLS,
     loadBarHistory,

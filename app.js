@@ -32,6 +32,7 @@ const {
   LS_SETTINGS,
   loadSettings,
   saveSettings,
+  appendSignalLog,
   LS_BARHIST,
   SHOT_SYMBOLS,
   loadBarHistory,
@@ -638,7 +639,8 @@ function renderSatelliteBlock(sig, symbol) {
         : `<p class="section-note">今日の始値でエントリー後、実際の約定価格を記録してください
            (固定逆指値と手仕舞い予定日が計算されます)。</p>
            <button class="btn btn-primary btn-small record-entry" data-symbol="${sig.symbol}" data-label="${sig.label}"
-             data-timeframe="daily" data-direction="${sig.direction}" data-layer="${sig.layer}" data-title="${sig.title}">
+             data-timeframe="daily" data-direction="${sig.direction}" data-layer="${sig.layer}" data-title="${sig.title}"
+             data-ref="${sig.referenceDate || sig.referenceWeek || ""}">
              このシグナルを記録
            </button>`
     }
@@ -740,7 +742,8 @@ function renderSignals(results) {
                取りません。ここで改めて記録すると実機の挙動より多く建ててしまうため、記録しないでください。</p>`
             : `<p class="section-note">エントリー(今日の始値)後、実際の約定価格を「保有中トランシェ」に記録してください。</p>
                <button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
-                 data-timeframe="daily" data-direction="${dsig.direction}" data-atr="${r.daily.atr14}">
+                 data-timeframe="daily" data-direction="${dsig.direction}" data-atr="${r.daily.atr14}"
+                 data-ref="${dsig.prevBar.date}">
                  このシグナルを記録
                </button>`
         }
@@ -821,7 +824,7 @@ function renderSignals(results) {
             : isNewToday
             ? `<button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
                  data-timeframe="weekly" data-direction="${wsig.direction}"
-                 data-prevweekhigh="${lastWeek.high}" data-prevweeklow="${lastWeek.low}">
+                 data-prevweekhigh="${lastWeek.high}" data-prevweeklow="${lastWeek.low}" data-ref="${lastWeek.weekKey}">
                  このシグナルを記録
                </button>`
             : `<p class="section-note">本日は新規判定日ではありません。既にエントリー済みなら記録不要、
@@ -872,6 +875,7 @@ function renderSignals(results) {
   container.querySelectorAll(".record-entry").forEach((btn) => {
     btn.addEventListener("click", () => openEntryModal(btn.dataset));
   });
+  logShownSignals(container);
 }
 
 // USDJPYアウトサイドデイ継続の保有カード。固定逆指値 + 時間切れ手仕舞い日を表示。
@@ -1038,6 +1042,18 @@ function renderPositions(freshDataBySymbol) {
     cb.addEventListener("change", () => {
       const pos = state.positions.find((p) => p.id === cb.dataset.pos);
       const t = pos.tranches.find((x) => x.name === cb.dataset.tranche);
+      if (cb.checked) {
+        // フォワード記録用に実際の決済価格を残す(空欄なら「未入力」として後で forward.html で入れられる)
+        const input = prompt(
+          `${pos.pairLabel} ${t.name} の決済価格(ブローカーの約定値)\n分からなければ空欄のまま OK`, "");
+        if (input === null) { cb.checked = false; return; } // キャンセルなら決済にしない
+        const v = parseFloat(input);
+        t.exitPrice = v > 0 ? v : null;
+        t.exitDate = todayStr();
+      } else {
+        delete t.exitPrice;
+        delete t.exitDate;
+      }
       t.closed = cb.checked;
       savePositions(state.positions);
       renderPositions(freshDataBySymbol);
@@ -1593,6 +1609,25 @@ async function runAiOrderCheck() {
 
 let pendingEntry = null;
 
+// フォワード記録: 画面に出ている「このシグナルを記録」ボタン(=EAなら建てる場面)を
+// その日のシグナルとして残す。ボタンを基準にするので、既に保有中・R≦0で見送り等、
+// EAが建てない場面は自然に除外される。
+function logShownSignals(container) {
+  const day = todayStr();
+  const entries = [];
+  container.querySelectorAll(".record-entry").forEach((btn) => {
+    const ds = btn.dataset;
+    const layer = ds.layer || ds.timeframe; // 衛星はレイヤーID、コアは daily/weekly
+    // key は判定に使った足(ref)で作る。週末や同じ日に何度取得しても同じシグナルは1件。
+    entries.push({
+      key: `${ds.ref || day}|${layer}|${ds.symbol}|${ds.direction}`, ref: ds.ref || null,
+      date: day, layer, symbol: ds.symbol, label: ds.label,
+      direction: ds.direction, title: ds.title || null,
+    });
+  });
+  if (entries.length) appendSignalLog(entries);
+}
+
 function openEntryModal(ds) {
   pendingEntry = ds;
   const kindLabel = ds.layer
@@ -1627,7 +1662,10 @@ function confirmEntry() {
       alert("そのレイヤーのシグナル情報が見つかりません。『本日の判定を取得』をやり直してください。");
       return;
     }
-    state.positions.push(buildSatelliteRecord(sig, price, scale));
+    const srec = buildSatelliteRecord(sig, price, scale);
+    srec.scaleAtEntry = scale;
+    srec.usdJpyAtEntry = effectiveUsdJpy(state.settings);
+    state.positions.push(srec);
     savePositions(state.positions);
     closeEntryModal();
     renderPositions(state.lastFetch);
@@ -1660,6 +1698,8 @@ function confirmEntry() {
     baseLot,
     scale
   );
+  rec.scaleAtEntry = scale;
+  rec.usdJpyAtEntry = effectiveUsdJpy(state.settings);
   state.positions.push(rec);
   savePositions(state.positions);
   closeEntryModal();

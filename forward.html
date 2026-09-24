@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#14161b" />
+<title>フォワード記録 | RBシグナル</title>
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="page">
+
+    <header class="topbar">
+      <div class="topbar-title">
+        <a class="nav-link" href="./index.html">← RBシグナルに戻る</a>
+        <h1>フォワード記録</h1>
+      </div>
+      <button id="themeToggle" class="icon-btn" aria-label="テーマ切替" type="button">◐</button>
+    </header>
+
+    <p class="disclaimer">
+      実際の約定・決済を、バックテスト(v5・実測スプレッド差引後)の想定と並べて追うページです。
+      記録はこの端末の中だけにあります。<strong>ときどき下の「バックアップを保存」で書き出してください</strong>
+      (ブラウザのデータ消去で消えます)。
+    </p>
+
+    <section class="card">
+      <h2>いまの成績は想定の範囲内か</h2>
+      <div id="summary"></div>
+    </section>
+
+    <section class="card">
+      <h2>シグナルをどれだけ実行できたか</h2>
+      <div id="execution"></div>
+    </section>
+
+    <section class="card">
+      <h2>レイヤー別: 実績とバックテスト</h2>
+      <div id="layers"></div>
+    </section>
+
+    <section class="card">
+      <h2>決済済みトレード</h2>
+      <p class="section-note">決済価格が空欄のものは損益に入りません。ブローカーの約定値を入れて「保存」してください。</p>
+      <div id="closedList"></div>
+    </section>
+
+    <section class="card">
+      <h2>バックアップ</h2>
+      <div class="btn-row">
+        <button id="exportBtn" class="btn btn-secondary btn-small" type="button">バックアップを保存</button>
+        <label class="btn btn-ghost btn-small" for="importFile">バックアップから復元</label>
+        <input id="importFile" type="file" accept="application/json,.json" hidden />
+      </div>
+      <p id="backupStatus" class="section-note"></p>
+    </section>
+
+  </div>
+
+  <script src="signal-core.js"></script>
+  <script src="forward-ref.js"></script>
+  <script src="forward.js"></script>
+</body>
+</html>
