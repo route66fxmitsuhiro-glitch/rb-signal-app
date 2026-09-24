@@ -729,6 +729,80 @@
     }
   }
 
+  // ========== AI(Claude vision)呼び出しの共通部品 ==========
+  // 2026-09-24、forward.html の「約定履歴スクショ → 決済価格」読み取りで導入。
+  // app.js の注文チェック/レート一覧読み取りは同じ処理を個別に持っている(未移行)。
+  function readFileAsDataUrl(file) {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // 長辺 maxEdge px を超える画像を JPEG に縮小する(送信サイズとトークンの節約)
+  function downscaleImage(dataUrl, maxEdge) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const long = Math.max(img.naturalWidth, img.naturalHeight);
+        if (long <= maxEdge) {
+          const m = /^data:(image\/[a-z+]+);base64,/.exec(dataUrl);
+          resolve({ dataUrl, mediaType: m ? m[1] : "image/png" });
+          return;
+        }
+        const scale = maxEdge / long;
+        const cv = document.createElement("canvas");
+        cv.width = Math.round(img.naturalWidth * scale);
+        cv.height = Math.round(img.naturalHeight * scale);
+        cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+        resolve({ dataUrl: cv.toDataURL("image/jpeg", 0.85), mediaType: "image/jpeg" });
+      };
+      img.onerror = () => resolve({ dataUrl, mediaType: "image/png" });
+      img.src = dataUrl;
+    });
+  }
+
+  // 画像(dataURLの配列)+指示文を送り、JSONスキーマどおりの応答をパースして返す。
+  // APIキーはユーザーの端末に保存されたもの(設定画面)を使い、ブラウザから直接呼ぶ。
+  async function callClaudeJson({ apiKey, model, system, dataUrls, text, schema, maxTokens }) {
+    const content = [];
+    for (const u of dataUrls || []) {
+      const m = /^data:(image\/[a-z+]+);base64,(.+)$/s.exec(u);
+      if (!m) throw new Error("画像の形式を認識できないスクショが含まれています");
+      content.push({ type: "image", source: { type: "base64", media_type: m[1], data: m[2] } });
+    }
+    content.push({ type: "text", text });
+    const mdl = model || "claude-opus-5";
+    const outputConfig = { format: { type: "json_schema", schema } };
+    if (mdl.indexOf("haiku") === -1) outputConfig.effort = "low"; // Haiku は effort 非対応
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({
+        model: mdl, max_tokens: maxTokens || 4096, system, output_config: outputConfig,
+        messages: [{ role: "user", content }],
+      }),
+    });
+    if (!res.ok) {
+      let msg = `HTTP ${res.status}`;
+      try {
+        const j = await res.json();
+        if (j && j.error && j.error.message) msg = j.error.message;
+      } catch (e) {}
+      throw new Error(msg);
+    }
+    const data = await res.json();
+    const tb = (data.content || []).find((b) => b.type === "text");
+    if (!tb) throw new Error("AIの応答を解釈できませんでした");
+    return JSON.parse(tb.text);
+  }
+
   // ========== フォワード記録: アプリが「この日エントリーせよ」と出したシグナルの記録 ==========
   // 2026-09-24導入。画面に「このシグナルを記録」ボタンが出たもの(=EAなら建てる場面)を
   // 1日1件ずつ残し、forward.html で「出したシグナルのうち実際に建てた割合」を数えるのに使う。
@@ -1365,6 +1439,9 @@
     LS_SIGNALLOG,
     loadSignalLog,
     appendSignalLog,
+    readFileAsDataUrl,
+    downscaleImage,
+    callClaudeJson,
     LS_BARHIST,
     SHOT_SYMBOLS,
     loadBarHistory,

@@ -45,6 +45,17 @@
     <section class="card">
       <h2>決済済みトレード</h2>
       <p class="section-note">決済価格が空欄のものは損益に入りません。ブローカーの約定値を入れて「保存」してください。</p>
+      <div class="btn-row">
+        <label class="btn btn-secondary btn-small" for="execShotFile">約定履歴のスクショを選ぶ</label>
+        <input id="execShotFile" type="file" accept="image/*" multiple hidden />
+        <button id="execAiBtn" class="btn btn-primary btn-small" type="button">AIで決済価格を読み取る</button>
+        <button id="execShotClear" class="btn btn-ghost btn-small" type="button">スクショをクリア</button>
+      </div>
+      <p class="section-note">ブローカーアプリの「約定履歴(決済済み)」画面を撮ってください。長ければスクロールして複数枚でOKです。
+        AIが読み取った値は下の表に入るだけで、<strong>「決済価格を保存」を押すまで保存されません</strong>。
+        設定画面の Anthropic APIキーを使います。</p>
+      <div id="execShotThumbs" class="btn-row"></div>
+      <p id="execAiStatus" class="section-note"></p>
       <div id="closedList"></div>
     </section>
 

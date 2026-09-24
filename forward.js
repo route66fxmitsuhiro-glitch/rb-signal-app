@@ -12,7 +12,9 @@
  * スプレッド・スリッページはすべて込みの値になる。
  */
 
-const { loadSettings, loadSignalLog, LS_SIGNALLOG } = SignalCore;
+const { loadSettings, loadSignalLog, LS_SIGNALLOG, readFileAsDataUrl, downscaleImage, callClaudeJson } = SignalCore;
+// 約定履歴スクショ(この画面を開いている間だけ保持。保存しない)とAIの読み取り結果
+const execState = { shots: [], ai: {} }; // ai[key] = { found, exitPrice, exitDate, confidence, detail }
 const REF = window.FORWARD_REF;
 const LS_POSITIONS = "rbsignal_positions_v1";
 const UNITS_PER_LOT = 100000; // FT5の1ロット=10万通貨(アプリの1枚=1万通貨=0.1ロット)
@@ -249,17 +251,29 @@ function renderClosed(positions, trades) {
   }
   const sorted = trades.slice().sort((a, b) => ((a.t.exitDate || "") < (b.t.exitDate || "") ? 1 : -1));
   let h = `<div style="overflow-x:auto;"><table class="tranche-table">
-    <thead><tr><th>決済日</th><th>建玉</th><th>枚数</th><th>約定</th><th>決済価格</th><th>損益</th></tr></thead><tbody>`;
+    <thead><tr><th>決済日</th><th>建玉</th><th>枚数</th><th>約定</th><th>決済価格</th><th>損益</th><th>AI</th></tr></thead><tbody>`;
   for (const x of sorted) {
     const p = x.pos;
+    const key = `${p.id}::${x.t.name}`;
+    const ai = execState.ai[key];
+    // AIの読み取り値は、未入力の欄にだけ下書きとして入れる(既存の値は上書きしない)
+    const shown = x.t.exitPrice != null ? x.t.exitPrice : ai && ai.found ? ai.exitPrice : "";
+    const aiCell = !ai ? "" : !ai.found
+      ? `<span class="badge none">見当たらず</span>`
+      : `<span class="badge ${ai.confidence === "high" ? "ok" : "warn"}">${ai.confidence === "high" ? "読取" : "要確認"}</span>`
+        + (x.t.exitPrice != null && Math.abs(x.t.exitPrice - ai.exitPrice) > 1e-9
+          ? `<br><span class="section-note">入力済み ${x.t.exitPrice} と違う: ${ai.exitPrice}</span>` : "")
+        + (ai.detail ? `<br><span class="section-note">${ai.detail}</span>` : "");
     h += `<tr><td>${x.t.exitDate || "-"}</td>
       <td>${p.pairLabel} ${p.isSatellite ? (p.title || "") : x.t.name}
         ${p.direction === "long" ? "L" : "S"}<br><span class="section-note">${p.entryDate}建</span></td>
       <td>${(x.t.lot * 10).toFixed(1)}</td>
       <td>${p.entryPrice}</td>
       <td><input class="exit-input" type="number" step="any" inputmode="decimal" style="width:6.5em;"
-        data-pos="${p.id}" data-tranche="${x.t.name}" value="${x.t.exitPrice != null ? x.t.exitPrice : ""}" /></td>
-      <td>${x.pnl != null ? yen(x.pnl) : '<span class="badge warn">未入力</span>'}</td></tr>`;
+        data-pos="${p.id}" data-tranche="${x.t.name}" data-aidate="${ai && ai.found && x.t.exitPrice == null ? ai.exitDate || "" : ""}"
+        value="${shown}" /></td>
+      <td>${x.pnl != null ? yen(x.pnl) : '<span class="badge warn">未入力</span>'}</td>
+      <td>${aiCell}</td></tr>`;
   }
   h += `</tbody></table></div>
     <div class="btn-row"><button id="saveExits" class="btn btn-primary btn-small" type="button">決済価格を保存</button></div>`;
@@ -272,7 +286,12 @@ function renderClosed(positions, trades) {
       if (!t) return;
       const v = parseFloat(inp.value);
       const nv = v > 0 ? v : null;
-      if (nv !== (t.exitPrice != null ? t.exitPrice : null)) { t.exitPrice = nv; changed++; }
+      if (nv !== (t.exitPrice != null ? t.exitPrice : null)) {
+        t.exitPrice = nv;
+        // AIがブローカーの約定日を読めていれば、決済日もそちらに合わせる
+        if (nv != null && /^\d{4}-\d{2}-\d{2}$/.test(inp.dataset.aidate || "")) t.exitDate = inp.dataset.aidate;
+        changed++;
+      }
     });
     if (!changed) return;
     if (!savePositions(positions)) { alert("保存に失敗しました"); return; }
@@ -327,6 +346,139 @@ function importBackup(file) {
   };
   reader.readAsText(file);
 }
+
+// ========== 約定履歴スクショ → 決済価格(AI読み取り) ==========
+// 決済済みトランシェの一覧(ペア・方向・枚数・約定価格・想定の決済水準)を手がかりとして渡し、
+// スクショの約定行と1件ずつ対応付けさせる。同じ建玉の T0〜T3 は枚数・方向が同じで見分けにくいので、
+// 各トランシェの利食い目標(約定±R×目標R)や固定逆指値を「どのあたりで決済されたはずか」として渡す。
+function trancheHint(pos, t) {
+  const sgn = pos.direction === "long" ? 1 : -1;
+  if (t.targetR != null && pos.R > 0) return { kind: "利食い目標", price: pos.entryPrice + sgn * pos.R * t.targetR };
+  if (pos.fixedStop != null) return { kind: "固定逆指値(または時間切れで成行)", price: pos.fixedStop };
+  return { kind: "撤退ライン(トレール)または時間切れ", price: null };
+}
+
+function renderExecThumbs() {
+  const el = document.getElementById("execShotThumbs");
+  el.innerHTML = execState.shots.map((s, i) =>
+    `<img src="${s}" alt="約定履歴 ${i + 1}" style="height:64px;border:1px solid var(--border);border-radius:6px;" />`).join("");
+}
+
+async function runExecAi() {
+  const status = document.getElementById("execAiStatus");
+  const btn = document.getElementById("execAiBtn");
+  const settings = loadSettings();
+  const apiKey = (settings.anthropicKey || "").trim();
+  status.classList.remove("error");
+  if (!apiKey) { status.textContent = "メイン画面の設定で Anthropic APIキーを入力してください。"; return; }
+  if (!execState.shots.length) { status.textContent = "先に約定履歴のスクショを選んでください。"; return; }
+  const positions = loadPositions();
+  const trades = closedTrades(positions);
+  if (!trades.length) { status.textContent = "決済済みのトランシェがありません。"; return; }
+
+  const items = trades.map((x) => {
+    const p = x.pos;
+    const h = trancheHint(p, x.t);
+    return {
+      key: `${p.id}::${x.t.name}`,
+      pair: p.symbol,
+      entry_side: p.direction === "long" ? "買い(ロング)" : "売り(ショート)",
+      closing_side: p.direction === "long" ? "売り決済" : "買い決済",
+      size_mai: Math.round(x.t.lot * 100) / 10, // 1枚=1万通貨
+      size_units: Math.round(x.t.lot * UNITS_PER_LOT),
+      entry_price: p.entryPrice,
+      entry_date: p.entryDate,
+      marked_closed_on: x.t.exitDate || null, // アプリで決済チェックを入れた日(約定日の目安)
+      expected_exit: h.kind,
+      expected_exit_price: h.price != null ? Number(h.price.toFixed(5)) : null,
+      already_entered_price: x.t.exitPrice != null ? x.t.exitPrice : null,
+    };
+  });
+
+  const schema = {
+    type: "object", additionalProperties: false, required: ["items"],
+    properties: {
+      items: {
+        type: "array",
+        items: {
+          type: "object", additionalProperties: false,
+          required: ["key", "found", "exitPrice", "exitDate", "confidence", "detail"],
+          properties: {
+            key: { type: "string" },
+            found: { type: "boolean" },
+            exitPrice: { type: "number", description: "決済の約定価格。見つからなければ0" },
+            exitDate: { type: "string", description: "決済の約定日 YYYY-MM-DD。読めなければ空文字" },
+            confidence: { type: "string", enum: ["high", "medium", "low"] },
+            detail: { type: "string", description: "どの行と対応させたか・迷った点(短い日本語)" },
+          },
+        },
+      },
+    },
+  };
+  const system =
+    "あなたはFXの約定履歴の読み取り補助です。ユーザーがブローカー(GMOクリック証券など)のスマホアプリの" +
+    "「約定履歴/決済済み」画面のスクリーンショットを1枚以上渡します(スクロールして分けて撮った場合は1つの一覧として扱う)。" +
+    "別途渡す『決済済みトランシェの一覧』の各項目(key)について、スクショの中の対応する決済の約定行を探し、その約定価格を返してください。" +
+    "対応付けの指針: (1)通貨ペアの表記揺れ(GBP/JPY・GBPJPY・ポンド円)は同一視。" +
+    "(2)決済行の売買は建玉と逆(ロングの決済は売り)。新規(エントリー)の行は対象外。" +
+    "(3)数量: 1枚=1万通貨。画面の数量単位が枚か通貨かはアプリによるので桁で判断。" +
+    "(4)同じ建玉から同じ数量のトランシェが複数あるときは、expected_exit_price(利食い目標や逆指値)に最も近い価格の行を割り当て、" +
+    "1つの約定行を2つのkeyに使い回さない。(5)日付は marked_closed_on・entry_date の前後で探す。" +
+    "(6)確実に対応付けられないものは found=false。迷いがあれば confidence を medium か low にして detail に理由を書く。" +
+    "価格は画面の表示どおりの桁で返す(丸めない)。渡された全keyについて1件ずつ返すこと。";
+
+  btn.disabled = true;
+  status.textContent = `AIが読み取り中…(スクショ${execState.shots.length}枚・対象${items.length}件)`;
+  try {
+    const out = await callClaudeJson({
+      apiKey, model: settings.visionModel, system, schema, maxTokens: 8192,
+      dataUrls: execState.shots,
+      text: "決済済みトランシェの一覧(JSON):\n" + JSON.stringify(items, null, 1) +
+        "\n\n上のスクリーンショットから各keyの決済価格を読み取り、指定スキーマのJSONで返してください。",
+    });
+    execState.ai = {};
+    let found = 0;
+    let filled = 0;
+    for (const it of out.items || []) {
+      if (!it || !it.key) continue;
+      if (it.found && !(it.exitPrice > 0)) it.found = false;
+      execState.ai[it.key] = it;
+      if (it.found) {
+        found++;
+        const tr = trades.find((x) => `${x.pos.id}::${x.t.name}` === it.key);
+        if (tr && tr.t.exitPrice == null) filled++;
+      }
+    }
+    renderAll();
+    status.textContent = `読み取り完了: ${items.length}件中 ${found}件を対応付け、未入力の${filled}件に下書きを入れました。` +
+      "値を確認して「決済価格を保存」を押してください(「要確認」の行は特に)。";
+  } catch (e) {
+    status.textContent = `読み取りに失敗しました: ${e.message}`;
+    status.classList.add("error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("execShotFile").addEventListener("change", async (e) => {
+  const files = Array.from(e.target.files || []);
+  for (const f of files) {
+    const raw = await readFileAsDataUrl(f);
+    const small = await downscaleImage(raw, 1568);
+    execState.shots.push(small.dataUrl);
+  }
+  e.target.value = "";
+  renderExecThumbs();
+  document.getElementById("execAiStatus").textContent = `スクショ ${execState.shots.length}枚を選択中。`;
+});
+document.getElementById("execAiBtn").addEventListener("click", runExecAi);
+document.getElementById("execShotClear").addEventListener("click", () => {
+  execState.shots = [];
+  execState.ai = {};
+  renderExecThumbs();
+  renderAll();
+  document.getElementById("execAiStatus").textContent = "";
+});
 
 // ========== テーマ(edit-bars.js と同じ) ==========
 function applyTheme() {
