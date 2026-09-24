@@ -593,9 +593,7 @@ function renderSatelliteBlock(sig, symbol) {
     const gateTxt = !sig.gateReady
       ? "ER算出に必要な確定日足(21本)が不足"
       : `avgER=${sig.avgER.toFixed(3)}(閾値 ${sig.erThreshold} ${sig.gateOpen ? "→ ゲート開" : "→ ゲート閉"})`;
-    const lagNote = sig.pair < "GBPJPY"
-      ? '<span class="section-note">[このペアはFT5の処理順がERペアより前なので前日のERを見る]</span>'
-      : "";
+    const lagNote = ""; // 旧: AUDJPY/EURJPYは前日ER。+90分執行では全層が当日ERを見る(2026-09-24)
     h += `<div class="pair-meta">効率比ゲート(3ペア平均、${dir}): ${gateTxt} ${lagNote}</div>`;
   }
 

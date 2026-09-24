@@ -616,8 +616,15 @@
   //   ラグ0一律 93.9% → ペア別ラグ 95.9%
   //   AUDoutside 87.5→95.2 / AUDday2fail 85.1→93.5 / EURJPYfadeOut 90.0→95.0
   // と、この規則で説明できる分だけ一致率が上がることを確認済み。
+  //
+  // 【2026-09-24更新】上の規則は「足の頭で執行していた」時代のもの。Exec730以降は全層が
+  // 足の確定から+90分に執行するので、その時点では3ペアとも新しい足が来て erValue が
+  // 更新済み = どのペアの層も**当日のER**を見る。v5実機ログとの照合で
+  //   前日ER(旧規則): AUDoutside 83.9% / AUDday2fail 83.4% / EURJPYfadeOut 79.7%
+  //   当日ER(ラグ0) : AUDoutside 96.8% / AUDday2fail 94.5% / EURJPYfadeOut 100.0%
+  // 11層合計 95.9% → 99.4%(reconcile_app_v5.py)。よって常に0を返す。
   function erLagForPair(pairCode) {
-    return pairCode < "GBPJPY" ? 1 : 0;
+    return 0;
   }
 
   // ========== ブローカーのレート一覧スクショから日足を再構成する ==========
