@@ -660,3 +660,10 @@ h2 {
   background: var(--negative-soft);
   border-color: var(--negative);
 }
+
+/* 分散レイヤー: レイヤーごとに罫線で区切り、名前を見出しにする(2026-09-26) */
+.sat-block { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
+.card h2 + .sat-block { border-top: none; padding-top: 0; margin-top: 4px; }
+.sat-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 4px; }
+.sat-name { font-family: var(--mono); font-size: 1.08rem; font-weight: 700; color: var(--accent); }
+.sat-title { font-size: 0.85rem; color: var(--text-dim); }

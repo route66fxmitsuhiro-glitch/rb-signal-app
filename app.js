@@ -585,8 +585,13 @@ function satelliteNoSignalReason(sig) {
 }
 
 function renderSatelliteBlock(sig, symbol) {
-  let h = `<div class="pair-meta" style="margin-top:10px;">
-    <span class="badge none">分散レイヤー: ${sig.title}(${sig.label})</span></div>`;
+  // レイヤーごとに罫線で区切り、レイヤー名を見出しとして強調する(2026-09-26 ユーザー要望)
+  return `<div class="sat-block">${renderSatelliteBody(sig, symbol)}</div>`;
+}
+
+function renderSatelliteBody(sig, symbol) {
+  let h = `<div class="sat-head"><span class="sat-name">${sig.label}</span>
+    <span class="sat-title">${sig.title}</span></div>`;
 
   if (sig.insufficientData) {
     h += `<div class="pair-meta">データ不足(確定バーが足りません)</div>`;
