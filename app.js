@@ -943,6 +943,14 @@ function renderSatelliteCard(pos) {
   return card;
 }
 
+// 保有状況が変わったら、保有カードだけでなく「本日の新規シグナル」欄も描き直す。
+// シグナル欄の「既に保有中(EAは新規建てしない)」表示は保有記録から判定しているため、
+// 片方だけ描き直すと、削除・決済した直後も古い表示が残る(2026-09-25のバグ)。
+function refreshAfterPositionChange(freshDataBySymbol) {
+  renderPositions(freshDataBySymbol);
+  if (state.lastResults) renderSignals(state.lastResults);
+}
+
 function renderPositions(freshDataBySymbol) {
   const container = document.getElementById("positionCards");
   const empty = document.getElementById("noPositions");
@@ -1059,15 +1067,21 @@ function renderPositions(freshDataBySymbol) {
       }
       t.closed = cb.checked;
       savePositions(state.positions);
-      renderPositions(freshDataBySymbol);
+      refreshAfterPositionChange(freshDataBySymbol);
     });
   });
   container.querySelectorAll(".delete-position").forEach((btn) => {
     btn.addEventListener("click", () => {
-      if (!confirm("このポジション記録を削除しますか?")) return;
+      const target = state.positions.find((p) => p.id === btn.dataset.pos);
+      const closedN = target ? target.tranches.filter((q) => q.closed).length : 0;
+      const msg = closedN
+        ? `このポジション記録を削除しますか?\n\n決済済みのトランシェ${closedN}件の記録も一緒に消え、フォワード記録の損益・決済済みトレードから外れます。\n\n` +
+          "全部決済しただけなら、削除ではなく残りのトランシェの「決済」にチェックを入れてください(保有中の一覧からは自動で消えます)。\n削除は、記録を間違えた場合だけにしてください。"
+        : "このポジション記録を削除しますか?\n(決済した場合は削除ではなく「決済」にチェックを入れてください。フォワード記録に残ります)";
+      if (!confirm(msg)) return;
       state.positions = state.positions.filter((p) => p.id !== btn.dataset.pos);
       savePositions(state.positions);
-      renderPositions(freshDataBySymbol);
+      refreshAfterPositionChange(freshDataBySymbol);
     });
   });
   container.querySelectorAll(".edit-exit").forEach((btn) => {
@@ -1086,7 +1100,7 @@ function renderPositions(freshDataBySymbol) {
       }
       pos.exitOverride = v;
       savePositions(state.positions);
-      renderPositions(freshDataBySymbol);
+      refreshAfterPositionChange(freshDataBySymbol);
     });
   });
   container.querySelectorAll(".clear-exit-override").forEach((btn) => {
@@ -1094,7 +1108,7 @@ function renderPositions(freshDataBySymbol) {
       const pos = state.positions.find((p) => p.id === btn.dataset.pos);
       pos.exitOverride = null;
       savePositions(state.positions);
-      renderPositions(freshDataBySymbol);
+      refreshAfterPositionChange(freshDataBySymbol);
     });
   });
 
@@ -1671,7 +1685,7 @@ function confirmEntry() {
     state.positions.push(srec);
     savePositions(state.positions);
     closeEntryModal();
-    renderPositions(state.lastFetch);
+    refreshAfterPositionChange(state.lastFetch);
     alert("記録しました。固定逆指値と手仕舞い予定日は保有カードに表示されます。");
     return;
   }
@@ -1706,7 +1720,7 @@ function confirmEntry() {
   state.positions.push(rec);
   savePositions(state.positions);
   closeEntryModal();
-  renderPositions(state.lastFetch);
+  refreshAfterPositionChange(state.lastFetch);
   alert("記録しました。「保有中トランシェ」に表示されます。");
 }
 
@@ -1720,12 +1734,19 @@ function manualAddPosition() {
   const price = parseFloat(prompt("約定価格:", ""));
   const R = parseFloat(prompt(timeframe === "daily" ? "エントリー時のATR14:" : "R(先週レンジ幅の概算):", ""));
   if (!price || !R) { alert("入力が不正です"); return; }
+  const dateIn = prompt("エントリー日(YYYY-MM-DD)。今日なら空欄のまま:", "");
+  if (dateIn === null) return;
+  const entryDate = dateIn.trim();
+  if (entryDate && !/^\d{4}-\d{2}-\d{2}$/.test(entryDate)) { alert("日付は YYYY-MM-DD で入力してください"); return; }
   const scale = lotScaleFactor(state.settings);
   const baseLot = timeframe === "daily" ? BASE_LOT_DAILY : BASE_LOT_WEEKLY;
   const rec = buildPositionRecord(pairInfo.label, pairInfo.symbol, timeframe, direction, price, R, baseLot, scale);
+  if (entryDate) rec.entryDate = entryDate;
+  rec.scaleAtEntry = scale;
+  rec.usdJpyAtEntry = effectiveUsdJpy(state.settings);
   state.positions.push(rec);
   savePositions(state.positions);
-  renderPositions(state.lastFetch);
+  refreshAfterPositionChange(state.lastFetch);
 }
 
 // ========== ブローカーのレート一覧スクショから日足を取り込む ==========
