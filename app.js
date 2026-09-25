@@ -341,10 +341,13 @@ const state = { settings: loadSettings(), positions: loadPositions(), lastFetch:
 // 埋まっている間は新規シグナルを一切評価しない(方向は問わない = 同時に持てる
 // のは1本だけ)。このアプリはEAの内部状態を持たないため、ユーザーが記録済みの
 // 未決済 usd-outside ポジションで代用判定する。
-function hasOpenSatellite(kind) {
-  return state.positions.some(
+function openSatellitePositions(kind) {
+  return state.positions.filter(
     (p) => p.kind === kind && p.tranches.some((t) => !t.closed)
   );
+}
+function hasOpenSatellite(kind) {
+  return openSatellitePositions(kind).length > 0;
 }
 
 // EAの AnyOpen()/WDAnyOpen() 相当。同じペア・時間軸・方向のトランシェが
@@ -599,6 +602,19 @@ function renderSatelliteBlock(sig, symbol) {
       : `avgER=${sig.avgER.toFixed(3)}(閾値 ${sig.erThreshold} ${sig.gateOpen ? "→ ゲート開" : "→ ゲート閉"})`;
     const lagNote = ""; // 旧: AUDJPY/EURJPYは前日ER。+90分執行では全層が当日ERを見る(2026-09-24)
     h += `<div class="pair-meta">効率比ゲート(3ペア平均、${dir}): ${gateTxt} ${lagNote}</div>`;
+  }
+
+  // 保有中の表示はシグナルの有無と無関係に出す(EAはスロットが埋まっている間、
+  // このレイヤーの新規判定自体をしない。以前はシグナル成立日にしか出なかった、2026-09-26)
+  const held = openSatellitePositions(sig.layer);
+  if (held.length) {
+    const p = held[0];
+    const dirJa = p.direction === "long" ? "ロング" : "ショート";
+    const since = p.entryDate ? `${fmtDay(p.entryDate)}建て` : "";
+    const due = p.exitDate ? ` / 時間切れ予定 ${fmtDay(p.exitDate)}` : "";
+    h += `<div class="pair-meta"><span class="badge warn">保有中</span>
+      <span class="badge ${p.direction === "long" ? "long" : "short"}">${dirJa}</span> ${since}${due}
+      — 決済まで新規は取らない</div>`;
   }
 
   h += `<div class="pair-meta">判定根拠: ${satelliteEvidence(sig, symbol)}</div>`;
