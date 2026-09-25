@@ -353,9 +353,13 @@ function hasOpenSatellite(kind) {
 // ため、保有中に同方向のブレイクが再度起きることは珍しくない)。
 // このアプリはEAの内部状態(handle配列)を持たないため、ユーザーが
 // 「保有中トランシェ」に記録している未決済ポジションで代用判定する。
+// コア(日足RideThin・週足ドンチャン)の保有判定。衛星も timeframe:"daily" で記録されるので、
+// isSatellite を除外しないと「同じペアの衛星ショート」をコアの日足ショート保有と誤認する
+// (2026-09-25、コアを全決済した後も「既に保有中」が消えなかったバグの原因)。
 function hasOpenPosition(symbol, timeframe, direction) {
   return state.positions.some(
     (p) =>
+      !p.isSatellite &&
       p.symbol === symbol &&
       p.timeframe === timeframe &&
       p.direction === direction &&
