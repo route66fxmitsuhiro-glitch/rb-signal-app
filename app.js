@@ -2301,7 +2301,19 @@ function init() {
   setInterval(renderExecBanner, 60000);   // 執行時刻までの残り時間を毎分更新
 
   if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("./sw.js").catch(() => {});
+    // sw.js はキャッシュ優先なので、更新直後の1回目は古いファイルが表示される。
+    // 新しいSWが制御を取ったら1回だけ再読み込みして、開き直し1回で新版になるようにする
+    // (以前は2回開き直す必要があり「直っていない」と見える原因になった、2026-09-26)。
+    const hadController = !!navigator.serviceWorker.controller;
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (!hadController || reloaded) return;
+      reloaded = true;
+      location.reload();
+    });
+    navigator.serviceWorker.register("./sw.js")
+      .then((reg) => reg.update())
+      .catch(() => {});
   }
 }
 
