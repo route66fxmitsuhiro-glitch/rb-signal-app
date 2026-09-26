@@ -711,7 +711,7 @@
   // app.js だけでなく edit-bars.js も Twelve Data APIキーを読むために使う。
   const LS_SETTINGS = "rbsignal_settings_v1";
   const SETTINGS_DEFAULTS = {
-    apiKey: "", capitalJpy: 3000000, ddPct: 20, usdJpy: 150,
+    apiKey: "", capitalJpy: 3000000, ddPct: 12, usdJpy: 150,
     usdJpyAuto: true,       // USD/JPYレートを前日終値から自動取得する
     usdJpyCached: null,     // 直近の取得値(セッションをまたいでロット計算に使う)
     usdJpyCachedDate: null,

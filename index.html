@@ -59,8 +59,8 @@
           <input id="capitalJpy" type="number" inputmode="numeric" value="3000000" min="0" step="10000" />
         </label>
         <label class="field">
-          <span>DD許容度(%)</span>
-          <input id="ddPct" type="number" inputmode="numeric" value="20" min="1" max="90" step="1" />
+          <span>DD許容度(%)— 確定損益ベース。含み損込みではこの約1.7倍まで沈み得る</span>
+          <input id="ddPct" type="number" inputmode="numeric" value="12" min="1" max="90" step="1" />
         </label>
         <label class="field field-check">
           <input id="usdJpyAuto" type="checkbox" checked />
@@ -72,8 +72,9 @@
         </label>
         <p id="usdJpyAutoNote" class="field-note"></p>
         <p class="field-note">
-          数量は「年間利益÷最大DD比率」方式(教訓27)で計算し、1枚=10,000通貨換算で「枚」表示します。基準最大DD $3,369.33(コア単体の実データ)を、
-          運用資金×DD許容度から逆算したUSD建てDD予算でスケーリングします。
+          数量は、v5 のバックテストの最大DD(確定損益ベース 3,024 USD、実測スプレッド後)が「運用資金×DD許容度」に
+          収まるように全層一律で縮尺します(1枚=10,000通貨)。<b>含み損込みの最大DDはその約1.68倍</b>(2008年)なので、
+          口座の評価額で20%まで許容するなら 12% 前後に設定します(20 ÷ 1.68)。全層一律の縮尺なので、フォワード検証の凍結ルールには反しません。
         </p>
         <button id="saveSettings" class="btn btn-secondary" type="button">設定を保存</button>
         <span id="settingsSaved" class="saved-flag hidden">保存しました</span>
