@@ -670,3 +670,8 @@ h2 {
 .sat-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 4px; }
 .sat-name { font-family: var(--mono); font-size: 0.72rem; font-weight: 700; color: var(--layer-name); }
 .sat-title { font-size: 0.85rem; color: var(--text-dim); }
+
+/* フォワード記録: 執行時スプレッドの入力欄(2026-09-26) */
+.spread-form { display: flex; flex-wrap: wrap; gap: 8px 14px; margin: 6px 0 8px; }
+.spread-form label { display: flex; align-items: center; gap: 6px; font-size: 0.82rem; color: var(--text-dim); }
+.spread-form input { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; }

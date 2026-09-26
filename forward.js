@@ -299,10 +299,171 @@ function renderClosed(positions, trades) {
   });
 }
 
+// ========== フォワード検証プロトコル(2026-09-26 確定) ==========
+// 外部監査の Forward Validation Protocol v1.0 を、v5 の実機ログで偽陽性率を校正したもの。
+// 根拠: docs/history/13_forward_protocol_2026-09-26.md / conflictaware/aplus/forward_threshold_check_v5.py
+// 件数はトランシェ単位(バックテストの 43,960件と同じ数え方)。STOP の PF 閾値は、
+// v5 がバックテストどおりの実力でも誤って当たる確率が約5%になる値。
+const PROTOCOL = {
+  refDdUsd: 3026,          // 確定損益ベースの過去最大DD(実測スプレッド後)
+  equityDdRatio: 1.68,     // 含み損込みの最大DDは確定損益ベースの1.68倍(equity_dd_v5.py)
+  pfExUws: 1.197,          // USDWeeklyStreak を除いたバックテストのPF(全層込みは1.236)
+  checkpoints: [           // n: 件数、watchPf/stopPf: これ未満で WATCH/STOP候補
+    { n: 500, watchPf: 1.00, stopPf: 0.75 },
+    { n: 1000, watchPf: 1.05, stopPf: 0.85 },
+    { n: 2000, watchPf: 1.08, stopPf: 0.95 },
+    { n: 4000, watchPf: 1.10, stopPf: 1.02 },
+  ],
+  earlyWatchPf: 0.90,      // 500件未満: PF<0.90 または DD≥1.0倍で WATCH(性能では止めない)
+  ddWatch: 1.25, ddStop: 1.50,
+};
+
+function pfOf(xs) {
+  const pos = xs.filter((v) => v > 0).reduce((s, v) => s + v, 0);
+  const neg = -xs.filter((v) => v < 0).reduce((s, v) => s + v, 0);
+  return neg > 0 ? pos / neg : pos > 0 ? Infinity : null;
+}
+
+// 決済日順の確定損益カーブから最大DD(円)
+function maxDdOf(xs) {
+  let cum = 0, peak = 0, dd = 0;
+  for (const v of xs) { cum += v; peak = Math.max(peak, cum); dd = Math.max(dd, peak - cum); }
+  return dd;
+}
+
+function fmtPf(v) {
+  return v == null ? "-" : v === Infinity ? "∞" : v.toFixed(2);
+}
+
+function renderProtocol(positions, trades, signals) {
+  const el = document.getElementById("protocol");
+  const done = trades.filter((x) => x.pnl != null)
+    .sort((a, b) => ((a.t.exitDate || "") < (b.t.exitDate || "") ? -1 : 1));
+  const n = done.length;
+  const pnl = done.map((x) => x.pnl);
+  const pf = pfOf(pnl);
+  const dd = maxDdOf(pnl);
+  const exUws = done.filter((x) => x.layer !== "usd-wstreak").map((x) => x.pnl);
+  const scale = median(positions.map((p) => p.scaleAtEntry));
+  const uj = currentUsdJpy();
+  const refDdJpy = scale ? PROTOCOL.refDdUsd * scale * uj : null;
+  const ddX = refDdJpy ? dd / refDdJpy : null;
+
+  // 到達済みの最大のチェックポイントで判定。500件未満は早期ルール。
+  const cp = PROTOCOL.checkpoints.filter((c) => n >= c.n).pop();
+  const next = PROTOCOL.checkpoints.find((c) => n < c.n);
+  let status = "PASS", cls = "ok", why = [];
+  if (!n) { status = "記録待ち"; cls = "none"; }
+  else if (!cp) {
+    if (pf != null && pf < PROTOCOL.earlyWatchPf) why.push(`PF ${fmtPf(pf)} < ${PROTOCOL.earlyWatchPf}`);
+    if (ddX != null && ddX >= 1.0) why.push(`DD ${ddX.toFixed(2)}倍 ≥ 1.0倍`);
+    if (why.length) { status = "WATCH"; cls = "warn"; } else { status = "判定前(500件未満)"; cls = "none"; }
+  } else {
+    const stop = [], watch = [];
+    if (pf != null && pf < cp.stopPf) stop.push(`PF ${fmtPf(pf)} < ${cp.stopPf}`);
+    else if (pf != null && pf < cp.watchPf) watch.push(`PF ${fmtPf(pf)} < ${cp.watchPf}`);
+    if (ddX != null && ddX >= PROTOCOL.ddStop) stop.push(`DD ${ddX.toFixed(2)}倍 ≥ ${PROTOCOL.ddStop}倍`);
+    else if (ddX != null && ddX >= PROTOCOL.ddWatch) watch.push(`DD ${ddX.toFixed(2)}倍 ≥ ${PROTOCOL.ddWatch}倍`);
+    if (stop.length) { status = "STOP-AND-AUDIT候補"; cls = "short"; why = stop.concat(watch); }
+    else if (watch.length) { status = "WATCH"; cls = "warn"; why = watch; }
+  }
+  const pfEx = pfOf(exUws);
+
+  let h = `<div class="pair-meta" style="font-size:1.1rem;"><span class="badge ${cls}">${status}</span>
+      ${why.length ? `— ${why.join(" / ")}` : ""}</div>
+    <table class="tranche-table"><tbody>
+      <tr><td>決済済み件数(トランシェ単位)</td><td><b>${n}</b>${next ? ` / 次の判定 ${next.n}件(あと${next.n - n}件)` : ""}</td></tr>
+      <tr><td>PF(実約定)</td><td>${fmtPf(pf)}</td></tr>
+      <tr><td>確定損益の最大DD</td><td>${yen(-dd)}${ddX != null ? `(基準の ${ddX.toFixed(2)}倍)` : ""}</td></tr>
+      <tr><td>USDWeeklyStreak を除いた PF</td><td>${fmtPf(pfEx)}(バックテスト ${PROTOCOL.pfExUws})</td></tr>
+    </tbody></table>
+    <div style="overflow-x:auto;"><table class="tranche-table">
+      <thead><tr><th>件数</th><th>目安</th><th>WATCH</th><th>STOP候補</th></tr></thead><tbody>
+      <tr><td>〜499</td><td>〜3か月</td><td>PF&lt;${PROTOCOL.earlyWatchPf} / DD≥1.0倍</td><td>性能では止めない</td></tr>`;
+  for (const c of PROTOCOL.checkpoints) {
+    const mark = cp === c ? " ◀" : "";
+    h += `<tr><td>${c.n.toLocaleString()}${mark}</td><td>約${(c.n / 1888 * 12).toFixed(0)}か月</td>
+      <td>PF&lt;${c.watchPf} / DD≥${PROTOCOL.ddWatch}倍</td><td>PF&lt;${c.stopPf} / DD≥${PROTOCOL.ddStop}倍</td></tr>`;
+  }
+  h += `</tbody></table></div>`;
+  if (refDdJpy) {
+    h += `<p class="section-note">DDの基準(1.0倍)= バックテストの確定損益ベースの最大DD ${PROTOCOL.refDdUsd.toLocaleString()} USD
+      × ロット倍率 ${scale.toFixed(2)} × ${uj.toFixed(1)}円 = <b>${yen(-refDdJpy)}</b>。
+      <b>含み損込みでは、その約${PROTOCOL.equityDdRatio}倍(${yen(-refDdJpy * PROTOCOL.equityDdRatio)})まで沈んだことがあります</b>
+      (2008年)。口座の評価額がこの程度まで下がるのは、バックテストの範囲内です。</p>`;
+  }
+  h += `<p class="section-note"><b>v5 はフォワード中は変更しません</b>(パラメータ・層・ロット比・執行時刻。不調な層だけ止めるのも禁止)。
+      STOP候補は「すぐ止める」ではなく「新規を止めて原因を精査する」合図です。
+      2,000件以降は、PF・DD・衛星の過半数がPF&lt;1・コアPF&lt;1・スプレッドの恒常的な超過のうち、2つ以上が重なったときに強く検討します。
+      シグナル・方向・ロットがアプリの仕様と食い違う、データ異常、注文異常は件数を待たずに精査してください。
+      PF の STOP 閾値は、v5 がバックテストどおりの実力でも誤って当たる確率が約5%になるように決めてあります。
+      USDWeeklyStreak は107件で全利益の約2割を占める層なので、除いた系列も並べて見ます。</p>`;
+  el.innerHTML = h;
+}
+
+// ========== 執行時スプレッドの記録 ==========
+// Exec730 が唯一頼っている前提(+90分でロールオーバーの広がりが解消している)を実地で確かめる。
+// 特に荒れた日(雇用統計の週明け等)の 7:00〜8:30 を記録する。
+const LS_SPREADLOG = "rbsignal_spread_log_v1";
+const SPREAD_PAIRS = ["GBP/JPY", "GBP/USD", "USD/JPY", "AUD/JPY", "EUR/JPY"];
+const NORMAL_SPREAD = { "GBP/JPY": 0.9, "GBP/USD": 1.0, "USD/JPY": 0.2, "AUD/JPY": 0.5, "EUR/JPY": 0.4 };
+
+function loadSpreadLog() {
+  try { return JSON.parse(localStorage.getItem(LS_SPREADLOG) || "[]"); } catch (e) { return []; }
+}
+
+function renderSpreadLog() {
+  const el = document.getElementById("spreadLog");
+  const log = loadSpreadLog();
+  const now = new Date(Date.now() + 9 * 3600000).toISOString();
+  let h = `<div class="spread-form">
+      <label>日付 <input id="spDate" type="date" value="${now.slice(0, 10)}" /></label>
+      <label>時刻 <input id="spTime" type="time" value="${now.slice(11, 16)}" /></label>`;
+  for (const s of SPREAD_PAIRS) {
+    h += `<label>${s} <input class="sp-in" data-pair="${s}" type="number" step="0.1" inputmode="decimal"
+      placeholder="${NORMAL_SPREAD[s]}" style="width:5em;" /></label>`;
+  }
+  h += `<label>メモ <input id="spNote" type="text" placeholder="例: 雇用統計の週明け" style="width:12em;" /></label>
+    </div>
+    <div class="btn-row"><button id="spSave" class="btn btn-primary btn-small" type="button">記録する</button></div>`;
+  if (log.length) {
+    h += `<div style="overflow-x:auto;"><table class="tranche-table"><thead><tr><th>日時</th>`
+      + SPREAD_PAIRS.map((s) => `<th>${s.replace("/", "")}</th>`).join("") + `<th>メモ</th><th></th></tr></thead><tbody>`;
+    const rows = log.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
+    for (const r of rows.slice(0, 30)) {
+      h += `<tr><td>${r.at.replace("T", " ")}</td>` + SPREAD_PAIRS.map((s) => {
+        const v = r.pips[s];
+        if (v == null) return "<td>-</td>";
+        const wide = v > NORMAL_SPREAD[s] * 2;   // 通常の2倍超は目立たせる
+        return `<td>${wide ? `<span class="badge warn">${v}</span>` : v}</td>`;
+      }).join("") + `<td>${r.note || ""}</td><td><button class="btn btn-ghost btn-small sp-del" data-at="${r.at}" type="button">×</button></td></tr>`;
+    }
+    h += `</tbody></table></div>`;
+  }
+  el.innerHTML = h;
+  document.getElementById("spSave").addEventListener("click", () => {
+    const pips = {};
+    el.querySelectorAll(".sp-in").forEach((i) => { const v = parseFloat(i.value); if (v >= 0) pips[i.dataset.pair] = v; });
+    if (!Object.keys(pips).length) { alert("スプレッドを1つ以上入力してください"); return; }
+    const at = `${document.getElementById("spDate").value}T${document.getElementById("spTime").value}`;
+    const all = loadSpreadLog().filter((r) => r.at !== at);
+    all.push({ at, pips, note: document.getElementById("spNote").value.trim() });
+    try { localStorage.setItem(LS_SPREADLOG, JSON.stringify(all)); } catch (e) { alert("保存に失敗しました"); return; }
+    renderSpreadLog();
+  });
+  el.querySelectorAll(".sp-del").forEach((b) => b.addEventListener("click", () => {
+    if (!confirm(`${b.dataset.at.replace("T", " ")} の記録を削除しますか?`)) return;
+    try { localStorage.setItem(LS_SPREADLOG, JSON.stringify(loadSpreadLog().filter((r) => r.at !== b.dataset.at))); } catch (e) { return; }
+    renderSpreadLog();
+  }));
+}
+
 function renderAll() {
   const positions = loadPositions();
   const signals = loadSignalLog();
   const trades = closedTrades(positions);
+  renderProtocol(positions, trades, signals);
+  renderSpreadLog();
   renderSummary(positions, trades, signals);
   renderExecution(positions, signals);
   renderLayers(positions, trades, signals);
@@ -313,7 +474,7 @@ function renderAll() {
 function exportBackup() {
   const data = {
     app: "rb-signal", kind: "forward-backup", exportedAt: new Date().toISOString(),
-    positions: loadPositions(), signalLog: loadSignalLog(),
+    positions: loadPositions(), signalLog: loadSignalLog(), spreadLog: loadSpreadLog(),
   };
   const blob = new Blob([JSON.stringify(data, null, 1)], { type: "application/json" });
   const a = document.createElement("a");
@@ -324,7 +485,7 @@ function exportBackup() {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   document.getElementById("backupStatus").textContent =
-    `建玉${data.positions.length}件・シグナル${data.signalLog.length}件を書き出しました。`;
+    `建玉${data.positions.length}件・シグナル${data.signalLog.length}件・スプレッド${data.spreadLog.length}件を書き出しました。`;
 }
 
 function importBackup(file) {
@@ -340,6 +501,8 @@ function importBackup(file) {
     try {
       localStorage.setItem(LS_POSITIONS, JSON.stringify(data.positions));
       localStorage.setItem(LS_SIGNALLOG, JSON.stringify(data.signalLog || []));
+      // スプレッド記録は 2026-09-26 以降のバックアップにだけある。無い古いバックアップでは今の記録を残す
+      if (Array.isArray(data.spreadLog)) localStorage.setItem(LS_SPREADLOG, JSON.stringify(data.spreadLog));
     } catch (e) { alert("保存に失敗しました"); return; }
     document.getElementById("backupStatus").textContent = "復元しました。";
     renderAll();
