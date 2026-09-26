@@ -1,7 +1,7 @@
 {
-  "name": "RBシグナル(コア版)",
+  "name": "RBシグナル(v5)",
   "short_name": "RBシグナル",
-  "description": "GBPJPY/GBPUSD/USDJPYの日足・週足ブレイクアウト・シグナルとロット計算",
+  "description": "v5(コア+分散レイヤー11層)の日足シグナル・ロット計算・フォワード記録",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",

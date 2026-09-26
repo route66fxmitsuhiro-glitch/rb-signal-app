@@ -428,7 +428,7 @@ function weeklyGuardHtml(guard, symbol) {
       現値が撤退ラインの向こう側にあるため、EAはこの週の新規建てを見送ります(r≤0)。</p>`;
   }
   return `<p class="section-note">${msg}(終値は戻す)。
-    火曜の始値が撤退ラインの外側で寄れば、EAはこの週の新規建てを見送ります。</p>`;
+    火曜7:30(冬8:30)の時点で撤退ラインの外側にあれば、EAはこの週の新規建てを見送ります。</p>`;
 }
 
 function renderWeeklyPreview(previewSignal, symbol) {
@@ -664,7 +664,7 @@ function renderSatelliteBody(sig, symbol) {
       alreadyOpen
         ? `<p class="section-note">${sig.label} レイヤーの建玉を既に保有中です。EAはこのレイヤーの
            建玉スロットを1つしか持たず、埋まっている間は方向を問わず新規を取りません。ここで記録しないでください。</p>`
-        : `<p class="section-note">今日の始値でエントリー後、実際の約定価格を記録してください
+        : `<p class="section-note">7:30(冬8:30)以降に成行でエントリーした後、実際の約定価格を記録してください
            (固定逆指値と手仕舞い予定日が計算されます)。</p>
            <button class="btn btn-primary btn-small record-entry" data-symbol="${sig.symbol}" data-label="${sig.label}"
              data-timeframe="daily" data-direction="${sig.direction}" data-layer="${sig.layer}" data-title="${sig.title}"
@@ -765,10 +765,10 @@ function renderSignals(results) {
         </table>
         ${
           alreadyOpen
-            ? `<p class="section-note">同じペア・方向のトランシェを既に保有中です。EA(RB12tuned)は
+            ? `<p class="section-note">同じペア・方向のトランシェを既に保有中です。EA(v5)は
                <code>AnyOpen()</code>により、そのトランシェが全て決済されるまで同方向の新規シグナルを
                取りません。ここで改めて記録すると実機の挙動より多く建ててしまうため、記録しないでください。</p>`
-            : `<p class="section-note">エントリー(今日の始値)後、実際の約定価格を「保有中トランシェ」に記録してください。</p>
+            : `<p class="section-note">7:30(冬8:30)以降に成行でエントリーした後、実際の約定価格を「保有中トランシェ」に記録してください。</p>
                <button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
                  data-timeframe="daily" data-direction="${dsig.direction}" data-atr="${r.daily.atr14}"
                  data-ref="${dsig.prevBar.date}">
@@ -842,13 +842,13 @@ function renderSignals(results) {
         </table>
         ${
           alreadyOpenWeekly
-            ? `<p class="section-note">同じペア・方向のトランシェを既に保有中です。EA(RB12tuned)は
+            ? `<p class="section-note">同じペア・方向のトランシェを既に保有中です。EA(v5)は
                <code>WDAnyOpen()</code>により、そのトランシェが全て決済されるまで同方向の新規シグナルを
                取りません。ここで改めて記録しないでください。</p>`
             : isNewToday && wsig.entryGuard && wsig.entryGuard.vetoed
             ? `<p class="section-note">現値が撤退ライン(前週${wsig.direction === "long" ? "安値" : "高値"})を既に越えているため、
-               EA(RB12tuned)はこの週の新規建てを見送ります(<code>r = 火曜始値 − 前週${wsig.direction === "long" ? "安値" : "高値"}</code>が
-               0以下になるため)。記録しないでください。火曜の始値が撤退ラインの内側に戻れば建てる可能性はあります。</p>`
+               EA(v5)はこの週の新規建てを見送ります(<code>r = 火曜7:30の約定価格 − 前週${wsig.direction === "long" ? "安値" : "高値"}</code>が
+               0以下になるため)。記録しないでください。火曜7:30(冬8:30)の時点で撤退ラインの内側に戻っていれば建てる可能性はあります。</p>`
             : isNewToday
             ? `<button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
                  data-timeframe="weekly" data-direction="${wsig.direction}"

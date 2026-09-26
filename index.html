@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#14161b" />
-<title>RBシグナル(コア版)</title>
+<title>RBシグナル(v5)</title>
 <link rel="manifest" href="manifest.json" />
 <link rel="icon" href="icons/icon-192.png" />
 <link rel="apple-touch-icon" href="icons/icon-192.png" />
@@ -15,16 +15,16 @@
 
     <header class="topbar">
       <div class="topbar-title">
-        <span class="eyebrow">GBPJPY・GBPUSD・USDJPY / コア版</span>
+        <span class="eyebrow">GBPJPY・GBPUSD・USDJPY・AUDJPY・EURJPY / v5</span>
         <h1>RBシグナル</h1>
       </div>
       <button id="themeToggle" class="icon-btn" aria-label="テーマ切替" type="button">◐</button>
     </header>
 
     <p class="disclaimer">
-      日足RideThin(5トランシェ)＋週足ドンチャン(3階層)のコアに加え、分散レイヤー第1弾として
-      <strong>USDJPYアウトサイドデイ継続</strong>を実装しています。rideサーキットブレーカーと残りの
-      分散レイヤーは未実装(順次追加予定)。売買を代行・自動発注する機能はありません。
+      最終版 <strong>v5</strong>(日足RideThin 5トランシェ＋週足ドンチャン3階層のコアと、分散レイヤー11層)の判定を表示します。
+      執行は日足確定の90分後(夏7:30/冬8:30)。<strong>v5 はフォワード検証中のため、設定・ロット比は変更しません</strong>。
+      売買を代行・自動発注する機能はありません。
       表示された内容は必ず自分の判断で確認してから発注してください。
     </p>
 
@@ -94,9 +94,9 @@
       </div>
       <p class="section-note">
         ブローカーのレート一覧を撮って、前日の日足として取り込みます。
-        <strong>平日は朝 05:30〜06:00</strong>(日足が確定する直前)に撮ってください。
-        06:00 を過ぎると H:/L: が当日のセッションにリセットされ、前日の高安が読めなくなります。
-        <strong>金曜のバーは土曜 06:00〜月曜 06:00 の間ならいつでも</strong>撮れます
+        <strong>平日は朝 05:30〜06:00(冬は 06:30〜07:00)</strong>(日足が確定する直前)に撮ってください。
+        06:00(冬07:00)を過ぎると H:/L: が当日のセッションにリセットされ、前日の高安が読めなくなります。
+        <strong>金曜のバーは土曜 06:00〜月曜 06:00(冬は07:00)の間ならいつでも</strong>撮れます
         (市場が閉じていて値が固定されているため、こちらの方が確実です)。
       </p>
       <p id="rateShotWindow" class="section-note"></p>
