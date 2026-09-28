@@ -948,7 +948,7 @@ function renderSatelliteCard(pos) {
     }
     <div class="pair-meta section-note">
       時間切れ手仕舞い目安: <strong>${pos.exitDate}</strong>(エントリーから${pos.holdDays}営業日、祝日は未考慮)。
-      その日の寄り付きで成行手仕舞い。利食い指値は置きません。
+      その日の7:30(冬8:30)以降に成行で手仕舞い。利食い指値は置きません。
     </div>
     <table class="tranche-table">
       <thead><tr><th>枠</th><th>枚数</th><th>目標</th><th>済</th></tr></thead>
@@ -957,7 +957,8 @@ function renderSatelliteCard(pos) {
           <td>unit</td>
           <td>${fmtMai(t.lot)}枚</td>
           <td>なし(時間切れ or 固定逆指値)</td>
-          <td><input type="checkbox" class="close-toggle" data-pos="${pos.id}" data-tranche="unit" ${t.closed ? "checked" : ""} /></td>
+          <td><input type="checkbox" class="close-toggle" data-pos="${pos.id}" data-tranche="unit"
+            data-default="${exit.price != null ? fmtPrice(exit.price, pos.symbol) : ""}" data-defkind="逆指値" ${t.closed ? "checked" : ""} /></td>
         </tr>
       </tbody>
     </table>
@@ -1056,7 +1057,9 @@ function renderPositions(freshDataBySymbol) {
         <td>${t.name}</td>
         <td>${fmtMai(t.lot)}枚</td>
         <td>${tp != null ? fmtPrice(tp, pos.symbol) : "なし(反対ブレイクのみ)"}</td>
-        <td><input type="checkbox" class="close-toggle" data-pos="${pos.id}" data-tranche="${t.name}" ${t.closed ? "checked" : ""} /></td>
+        <td><input type="checkbox" class="close-toggle" data-pos="${pos.id}" data-tranche="${t.name}"
+          data-default="${tp != null ? fmtPrice(tp, pos.symbol) : exit.price != null ? fmtPrice(exit.price, pos.symbol) : ""}"
+          data-defkind="${tp != null ? "利食い指値" : "撤退ライン"}" ${t.closed ? "checked" : ""} /></td>
       </tr>`;
     }
     html += `</tbody></table>`;
@@ -1079,9 +1082,16 @@ function renderPositions(freshDataBySymbol) {
       const pos = state.positions.find((p) => p.id === cb.dataset.pos);
       const t = pos.tranches.find((x) => x.name === cb.dataset.tranche);
       if (cb.checked) {
-        // フォワード記録用に実際の決済価格を残す(空欄なら「未入力」として後で forward.html で入れられる)
+        // フォワード記録用に実際の決済価格を残す(空欄なら「未入力」として後で forward.html で入れられる)。
+        // 初期値は、利食い目標があるトランシェはその指値、無いもの(ride・週足ride・衛星)は
+        // その時点の撤退ライン/固定逆指値(2026-09-29 ユーザー要望)。実際の約定値と違えば直してもらう。
+        const def = cb.dataset.default || "";
+        const kind = cb.dataset.defkind || "";
         const input = prompt(
-          `${pos.pairLabel} ${t.name} の決済価格(ブローカーの約定値)\n分からなければ空欄のまま OK`, "");
+          `${pos.pairLabel} ${t.name} の決済価格(ブローカーの約定値)\n`
+          + (def ? `初期値は${kind}(${def})です。約定値が違えば直してください` : "")
+          + (def && kind !== "利食い指値" ? "(時間切れの成行決済なら約定値に)" : "")
+          + `\n分からなければ空欄のまま OK`, def);
         if (input === null) { cb.checked = false; return; } // キャンセルなら決済にしない
         const v = parseFloat(input);
         t.exitPrice = v > 0 ? v : null;
