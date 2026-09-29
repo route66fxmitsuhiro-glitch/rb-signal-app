@@ -379,8 +379,12 @@ function takenThisWeek(pred) {
 // アプリは決済の時刻を持たないため、該当するときは利用者に決済時刻の確認を促す(2026-09-29、GBPUSD で発生)。
 function closedOnExecDay(pred, refBarDate) {
   if (!refBarDate) return false;
-  const execDay = addTradingDays(refBarDate, 1);
-  return state.positions.some((p) => pred(p) && p.tranches.some((t) => t.closed && t.exitDate === execDay));
+  return closedOnDay(pred, addTradingDays(refBarDate, 1));
+}
+
+// 指定日に決済されたトランシェを持つ建玉があるか(週足・週足ストリークは執行日=今日を渡す)
+function closedOnDay(pred, day) {
+  return state.positions.some((p) => pred(p) && p.tranches.some((t) => t.closed && t.exitDate === day));
 }
 
 function takenSince(pred, fromDate) {
@@ -666,6 +670,9 @@ function renderSatelliteBody(sig, symbol) {
   const isSameLayer = (p) => p.isSatellite && p.kind === sig.layer;
   const takenDone = !alreadyOpen &&
     (sig.weekly ? takenThisWeek(isSameLayer) : takenForSignal(isSameLayer, sig.referenceDate));
+  // 同じ層の前の建玉を執行日に決済した(方向は問わない。EA は1層1スロット)
+  const closedToday = !alreadyOpen && !takenDone &&
+    (sig.weekly ? closedOnDay(isSameLayer, todayStr()) : closedOnExecDay(isSameLayer, sig.referenceDate));
   const rName = sig.weekly ? "週足ATR14" : "ATR14";
   const timeout = sig.weekly ? `${sig.holdWeeks}週で手仕舞い` : `${sig.holdDays}営業日で手仕舞い`;
   const conflictNote =
@@ -679,6 +686,7 @@ function renderSatelliteBody(sig, symbol) {
       <span class="badge ${badge}">${sig.direction === "long" ? "ロング" : "ショート"}</span>
       ${alreadyOpen ? '<span class="badge warn">既に保有中(EAは1本しか持たない)</span>' : ""}
       ${takenDone ? '<span class="badge ok">記録済み(決済済み)</span>' : ""}
+      ${closedToday ? '<span class="badge warn">要確認: 前の建玉を本日決済</span>' : ""}
       ${rName}=${fmtPrice(sig.atr14, symbol)}(R)
     </div>
     ${conflictNote}
@@ -699,7 +707,10 @@ function renderSatelliteBody(sig, symbol) {
            建玉スロットを1つしか持たず、埋まっている間は方向を問わず新規を取りません。ここで記録しないでください。</p>`
         : takenDone
         ? `<p class="section-note">このシグナルは記録済みで、決済済みです。EAは同じ足で建て直さないので、もう一度記録しないでください。</p>`
-        : `<p class="section-note">7:30(冬8:30)以降に成行でエントリーした後、実際の約定価格を記録してください
+        : `${closedToday ? `<p class="section-note"><strong>この層の前の建玉を本日決済しています。</strong>
+           <strong>時間切れで決済した</strong>なら、EAはその日は新規判定をしないので<strong>見送り</strong>(記録しない)。
+           <strong>逆指値で決済した</strong>なら、7:30(冬8:30)より前の決済なら有効、後なら見送りです。
+           ブローカーの約定履歴で決済の理由と時刻を確認してください。</p>` : ""}<p class="section-note">7:30(冬8:30)以降に成行でエントリーした後、実際の約定価格を記録してください
            (固定逆指値と手仕舞い予定日が計算されます)。</p>
            <button class="btn btn-primary btn-small record-entry" data-symbol="${sig.symbol}" data-label="${sig.label}"
              data-timeframe="daily" data-direction="${sig.direction}" data-layer="${sig.layer}" data-title="${sig.title}"
@@ -854,8 +865,9 @@ function renderSignals(results) {
       // (エントリー記録時に実際の約定価格でこの計算をやり直す)。
       const rApprox = lastWeek.high - lastWeek.low;
       const alreadyOpenWeekly = hasOpenPosition(r.symbol, "weekly", wsig.direction);
-      const takenDoneWeekly = !alreadyOpenWeekly && isNewToday && takenThisWeek(
-        (p) => !p.isSatellite && p.symbol === r.symbol && p.timeframe === "weekly" && p.direction === wsig.direction);
+      const sameWeekly = (p) => !p.isSatellite && p.symbol === r.symbol && p.timeframe === "weekly" && p.direction === wsig.direction;
+      const takenDoneWeekly = !alreadyOpenWeekly && isNewToday && takenThisWeek(sameWeekly);
+      const closedTodayWeekly = !alreadyOpenWeekly && isNewToday && !takenDoneWeekly && closedOnDay(sameWeekly, todayStr());
       html += `
         <div class="pair-meta" style="margin-top:10px;">
           <span class="badge ${badge}">週足 ${wsig.direction === "long" ? "ロング" : "ショート"}</span>
@@ -863,6 +875,7 @@ function renderSignals(results) {
           ${wsig.outside ? '<span class="badge warn">アウトサイド週(前週終値で一本化)</span>' : ""}
           ${alreadyOpenWeekly ? '<span class="badge warn">既に保有中(EAは新規建てしない)</span>' : ""}
           ${takenDoneWeekly ? '<span class="badge ok">記録済み(全トランシェ決済済み)</span>' : ""}
+          ${closedTodayWeekly ? '<span class="badge warn">要確認: 前の建玉を本日決済</span>' : ""}
           ${wsig.entryGuard && wsig.entryGuard.vetoed ? '<span class="badge short">EA新規建て見送り(R≤0)</span>' : ""}
           ${wsig.entryGuard && !wsig.entryGuard.vetoed ? '<span class="badge warn">撤退ラインを一時越え・要注意</span>' : ""}
           R(参考値、約定前の概算)=${fmtPrice(rApprox, r.symbol)}
@@ -903,7 +916,11 @@ function renderSignals(results) {
                EA(v5)はこの週の新規建てを見送ります(<code>r = 火曜7:30の約定価格 − 前週${wsig.direction === "long" ? "安値" : "高値"}</code>が
                0以下になるため)。記録しないでください。火曜7:30(冬8:30)の時点で撤退ラインの内側に戻っていれば建てる可能性はあります。</p>`
             : isNewToday
-            ? `<button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
+            ? `${closedTodayWeekly ? `<p class="section-note"><strong>同じ方向の前の週足建玉を本日決済しています。</strong>
+                 その決済が<strong>7:30(冬8:30)より前</strong>ならEAはこのシグナルで新しく建てます(有効)。
+                 <strong>7:30より後</strong>なら、EAは7:30の時点でまだ保有中だったので今週は見送ります(記録しない)。
+                 ブローカーの約定履歴で決済時刻を確認してください。</p>` : ""}
+               <button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
                  data-timeframe="weekly" data-direction="${wsig.direction}"
                  data-prevweekhigh="${lastWeek.high}" data-prevweeklow="${lastWeek.low}" data-ref="${lastWeek.weekKey}">
                  このシグナルを記録
