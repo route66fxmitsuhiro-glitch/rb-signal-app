@@ -655,6 +655,7 @@ function toggleTheme() {
   localStorage.setItem("rbsignal_theme_v1", next);
 }
 
+SignalCore.showAppVersion("appVersion"); // ヘッダーに現在の版を表示
 applyTheme();
 document.getElementById("themeToggle").addEventListener("click", toggleTheme);
 document.getElementById("exportBtn").addEventListener("click", exportBackup);

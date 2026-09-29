@@ -675,3 +675,7 @@ h2 {
 .spread-form { display: flex; flex-wrap: wrap; gap: 8px 14px; margin: 6px 0 8px; }
 .spread-form label { display: flex; align-items: center; gap: 6px; font-size: 0.82rem; color: var(--text-dim); }
 .spread-form input { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; }
+
+/* ヘッダーの版表示(2026-09-29) */
+.app-version { margin-left: auto; margin-right: 8px; font-family: var(--mono); font-size: 0.72rem; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; align-self: center; white-space: nowrap; }

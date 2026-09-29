@@ -1405,9 +1405,31 @@
     };
   }
 
+  // 画面右上などにアプリの版(sw.js の CACHE_NAME の末尾 vNN)を表示する。
+  // 動いている Service Worker に問い合わせるので、表示は「実際に使われている版」になる。
+  // SW がまだ制御していない初回や非対応環境では何も出さない。
+  function showAppVersion(elId) {
+    if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+    const el = document.getElementById(elId);
+    if (!el) return;
+    navigator.serviceWorker.addEventListener("message", (ev) => {
+      const d = ev.data;
+      if (!d || d.type !== "rb-version") return;
+      const m = /v(\d+)$/.exec(d.version || "");
+      el.textContent = m ? `v${m[1]}` : d.version;
+      el.hidden = false;
+    });
+    const ask = () => {
+      if (navigator.serviceWorker.controller) navigator.serviceWorker.controller.postMessage("rb-version");
+    };
+    ask();
+    navigator.serviceWorker.addEventListener("controllerchange", ask);
+  }
+
   return {
     PAIRS,
     EXTRA_PAIRS,
+    showAppVersion,
     ALL_PAIRS,
     SATELLITES,
     CORE_LOTS,

@@ -2354,6 +2354,7 @@ function init() {
   renderExecBanner();
   setInterval(renderExecBanner, 60000);   // 執行時刻までの残り時間を毎分更新
 
+  SignalCore.showAppVersion("appVersion"); // ヘッダーに現在の版を表示
   if ("serviceWorker" in navigator) {
     // sw.js はキャッシュ優先なので、更新直後の1回目は古いファイルが表示される。
     // 新しいSWが制御を取ったら1回だけ再読み込みして、開き直し1回で新版になるようにする
