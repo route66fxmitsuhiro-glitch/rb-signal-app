@@ -359,6 +359,16 @@ function hasOpenSatellite(kind) {
 // コア(日足RideThin・週足ドンチャン)の保有判定。衛星も timeframe:"daily" で記録されるので、
 // isSatellite を除外しないと「同じペアの衛星ショート」をコアの日足ショート保有と誤認する
 // (2026-09-25、コアを全決済した後も「既に保有中」が消えなかったバグの原因)。
+// このシグナルの執行日(判定根拠の最後の足の翌営業日)以降に記録された建玉があるか(決済済みも含む)。
+// EAは1本の足につき判定を1回しかしないので、その日に建てて同じ日に全決済しても、同じ足で建て直さない。
+// 保有判定(hasOpenPosition / hasOpenSatellite)は未決済だけを見るため、これが無いと
+// 「当日中に全トランシェ決済 → 同じシグナルが新規として再表示」になる(2026-09-29 GBPUSD日足で発生)。
+function takenForSignal(pred, refBarDate) {
+  if (!refBarDate) return false;
+  const execDay = addTradingDays(refBarDate, 1);
+  return state.positions.some((p) => pred(p) && p.entryDate && p.entryDate >= execDay);
+}
+
 function hasOpenPosition(symbol, timeframe, direction) {
   return state.positions.some(
     (p) =>
@@ -634,6 +644,9 @@ function renderSatelliteBody(sig, symbol) {
   const stopPips = fmtPips(sig.atr14 * sig.stopMult, symbol);
   const badge = sig.direction === "long" ? "long" : "short";
   const alreadyOpen = hasOpenSatellite(sig.layer);
+  // 当日に建てて固定逆指値で当日中に決済された場合も、同じ足では建て直さない(週足ストリークは対象外)
+  const takenDone = !alreadyOpen && !sig.weekly &&
+    takenForSignal((p) => p.isSatellite && p.kind === sig.layer, sig.referenceDate);
   const rName = sig.weekly ? "週足ATR14" : "ATR14";
   const timeout = sig.weekly ? `${sig.holdWeeks}週で手仕舞い` : `${sig.holdDays}営業日で手仕舞い`;
   const conflictNote =
@@ -646,6 +659,7 @@ function renderSatelliteBody(sig, symbol) {
     <div class="pair-meta">
       <span class="badge ${badge}">${sig.direction === "long" ? "ロング" : "ショート"}</span>
       ${alreadyOpen ? '<span class="badge warn">既に保有中(EAは1本しか持たない)</span>' : ""}
+      ${takenDone ? '<span class="badge ok">記録済み(決済済み)</span>' : ""}
       ${rName}=${fmtPrice(sig.atr14, symbol)}(R)
     </div>
     ${conflictNote}
@@ -664,6 +678,8 @@ function renderSatelliteBody(sig, symbol) {
       alreadyOpen
         ? `<p class="section-note">${sig.label} レイヤーの建玉を既に保有中です。EAはこのレイヤーの
            建玉スロットを1つしか持たず、埋まっている間は方向を問わず新規を取りません。ここで記録しないでください。</p>`
+        : takenDone
+        ? `<p class="section-note">このシグナルは記録済みで、決済済みです。EAは同じ足で建て直さないので、もう一度記録しないでください。</p>`
         : `<p class="section-note">7:30(冬8:30)以降に成行でエントリーした後、実際の約定価格を記録してください
            (固定逆指値と手仕舞い予定日が計算されます)。</p>
            <button class="btn btn-primary btn-small record-entry" data-symbol="${sig.symbol}" data-label="${sig.label}"
@@ -735,11 +751,15 @@ function renderSignals(results) {
       const scale = lotScaleFactor(state.settings);
       const tranches = tranchesWithLots(DAILY_TRANCHES, BASE_LOT_DAILY, scale);
       const alreadyOpen = hasOpenPosition(r.symbol, "daily", dsig.direction);
+      const takenDone = !alreadyOpen && takenForSignal(
+        (p) => !p.isSatellite && p.symbol === r.symbol && p.timeframe === "daily" && p.direction === dsig.direction,
+        dsig.prevBar.date);
       html += `
         <div class="pair-meta">
           <span class="badge ${badge}">日足 ${dsig.direction === "long" ? "ロング" : "ショート"}</span>
           ${dsig.outside ? '<span class="badge warn">アウトサイド(終値の陽線/陰線で一本化)</span>' : ""}
           ${alreadyOpen ? '<span class="badge warn">既に保有中(EAは新規建てしない)</span>' : ""}
+          ${takenDone ? '<span class="badge ok">記録済み(全トランシェ決済済み)</span>' : ""}
           ATR14=${fmtPrice(r.daily.atr14, r.symbol)} (R)
         </div>
         <div class="pair-meta">
@@ -768,6 +788,9 @@ function renderSignals(results) {
             ? `<p class="section-note">同じペア・方向のトランシェを既に保有中です。EA(v5)は
                <code>AnyOpen()</code>により、そのトランシェが全て決済されるまで同方向の新規シグナルを
                取りません。ここで改めて記録すると実機の挙動より多く建ててしまうため、記録しないでください。</p>`
+            : takenDone
+            ? `<p class="section-note">このシグナルは記録済みで、全トランシェが決済済みです。
+               EAは同じ足で建て直さないので、もう一度記録しないでください。</p>`
             : `<p class="section-note">7:30(冬8:30)以降に成行でエントリーした後、実際の約定価格を「保有中トランシェ」に記録してください。</p>
                <button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
                  data-timeframe="daily" data-direction="${dsig.direction}" data-atr="${r.daily.atr14}"
