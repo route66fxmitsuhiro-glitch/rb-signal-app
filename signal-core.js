@@ -289,16 +289,18 @@
     return ymd(d);
   }
 
-  // dateStr から平日を n 日進めた日付(YYYY-MM-DD)。土日はスキップ、祝日は
-  // 考慮しない目安。EAは新しい日足バー確定ごとに保有日数を+1し、HoldDays に
-  // 達した最初のティックで手仕舞うため、n=HoldDays でその手仕舞い日に相当する。
+  // dateStr から日足の営業日を n 日進めた日付(YYYY-MM-DD)。EAは新しい日足バー確定ごとに
+  // 保有日数を+1し、HoldDays に達した最初のティックで手仕舞うため、n=HoldDays でその手仕舞い日に相当する。
+  // 土日と元日(1/1)を飛ばす。FT5 の NY17:00 区切りの日足で平日に足が無いのは元日だけ
+  // (2014年以降の9回、クリスマスは足がある。2026-09-29 に D1 キャッシュで確認)。
   function addTradingDays(dateStr, n) {
     const d = new Date(dateStr + "T00:00:00Z");
     let added = 0;
     while (added < n) {
       d.setUTCDate(d.getUTCDate() + 1);
       const wd = d.getUTCDay();
-      if (wd !== 0 && wd !== 6) added++;
+      const newYear = d.getUTCMonth() === 0 && d.getUTCDate() === 1;
+      if (wd !== 0 && wd !== 6 && !newYear) added++;
     }
     return ymd(d);
   }
@@ -1405,6 +1407,242 @@
     };
   }
 
+  // ========== 全ペアの判定を一度に作る(2026-09-29 app.js から移動) ==========
+  // barsBySymbol: { "GBP/JPY": [確定日足...], ... }(5ペア、昇順、末尾が直前に確定した足)。
+  // 画面(app.js)と再生テストが同じ手順で判定するため、ここに1か所だけ置く。
+  function analyzeBars(barsBySymbol) {
+    const core = [];
+    for (const p of PAIRS) {
+      // NY17:00区切りでは土日ラベルの足が無いので、コア日足・週足集計・ERゲートは同じ系列を使う
+      const bars = barsBySymbol[p.symbol] || [];
+      const weeklySourceBars = bars;
+      const atr14 = computeATR14(bars);
+      const dailySignal = computeDailySignal(bars);
+      const allWeeklyBars = aggregateWeekly(weeklySourceBars);
+      const weeklyBars = officialWeeks(allWeeklyBars);
+      // 直近の完成日足(新規判定日=通常火曜なら「月曜の足」)で entryGuard(EA の r>0 ガードの近似)を作る
+      const latestDailyBar = weeklySourceBars.length ? weeklySourceBars[weeklySourceBars.length - 1] : null;
+      const weeklySignal = computeWeeklySignal(weeklyBars, latestDailyBar);
+      // 暦の上では金曜まで終わっているが EA はまだ確定扱いしていない週(月曜〜火曜朝)の参考プレビュー
+      const pvWeeks = previewWeeks(allWeeklyBars);
+      const previewSignal = pvWeeks ? computeWeeklySignal(pvWeeks, latestDailyBar) : null;
+      core.push({
+        symbol: p.symbol,
+        label: p.label,
+        daily: { bars, atr14, signal: dailySignal },
+        weekly: { bars: weeklyBars, signal: weeklySignal, previewSignal },
+        weeklySourceBars, // weeklyBreakdown(日別内訳の診断表示)用
+        isNewWeekToday: lastCompleteBarIsMonday(weeklySourceBars),
+      });
+    }
+    // ER ゲートはコア3ペアの同じ日足系列から(EA も RunDailySignals 内で erValue[p] を更新する)
+    const er = computeAvgER(barsBySymbol, 20, 0);
+    const erPrev = computeAvgER(barsBySymbol, 20, 1);
+    const usdWeeks = officialWeeks(aggregateWeekly(barsBySymbol["USD/JPY"] || []));
+    const newWeek = lastCompleteBarIsMonday(barsBySymbol["USD/JPY"] || []);
+    const satellites = computeAllSatellites(barsBySymbol, er, erPrev, { "USD/JPY": usdWeeks }, newWeek);
+    return { core, er, erPrev, satellites };
+  }
+
+  // ========== コアのトランシェとロット(2026-09-29 app.js から移動) ==========
+  // 画面と再生テスト(scripts/replay_app_state_v5.py)が同じ計算を使えるよう、ここに置く。
+  const DAILY_TRANCHES = [
+    { name: "T0", weight: 0.30, targetR: 0.1 },
+    { name: "T1", weight: 0.30, targetR: 0.2 },
+    { name: "T2", weight: 0.20, targetR: 0.3 },
+    { name: "T3", weight: 0.10, targetR: 0.5 },
+    { name: "ride", weight: 0.10, targetR: null, hardStopR: -1.0, floorLot: 0.01 },
+  ];
+
+  // 週足ドンチャン(3階層)。Rはブレイク幅そのもの(ATRではない)。rideにハードストップなし(教訓34)。
+  // balanced(2026-09-10): WDT01LotMult=0.334 / WDRideLotMult=0.167。
+  // EAは tierLot = RoundLot(WDLotSize/3) = RoundLot(0.10/3) = 0.03 を作り、
+  // T0/T1 に ×0.334(→0.01)、ride に ×0.167(→0.01)を掛けて再度丸め、0.01で床止め。
+  const WEEKLY_TRANCHES = [
+    { name: "T0", weight: 1 / 3, targetR: 0.5, lotMult: 0.334, floorLot: 0.01 },
+    { name: "T1", weight: 1 / 3, targetR: 1.0, lotMult: 0.334, floorLot: 0.01 },
+    { name: "ride", weight: 1 / 3, targetR: null, lotMult: 0.167, floorLot: 0.01 },
+  ];
+
+  const BASE_LOT_DAILY = 0.10;   // バックテスト基準ロット(1ペアあたり)
+  const BASE_LOT_WEEKLY = 0.10;  // バックテスト基準ロット(1ペアあたり)
+
+  // EAのRoundLot()と完全に同じ式(floor(lot*100+0.5)/100、round-half-up)。
+  // 最小0.01への強制はしない — 実際のEAもスケールが小さすぎて0.005未満に
+  // 丸まった場合は0を返し、そのトランシェは発注されない(教訓67のロット丸め
+  // 誤差の議論と同じ挙動)。
+  function roundLot(v) {
+    return Math.floor(v * 100 + 0.5) / 100;
+  }
+
+  function tranchesWithLots(tranches, baseLot, scale) {
+    return tranches.map((t) => {
+      let lot;
+      if (t.lotMult != null) {
+        // EA互換の2段階: tierLot = RoundLot(baseLot*weight) を作ってから
+        // lotMult を掛けて再度丸める。EAは最後に0.01で床止めする
+        // (これが無いと多重適用で0.00になり発注が失敗する。教訓48の失敗パターン)。
+        const tierLot = roundLot(baseLot * t.weight * scale);
+        lot = roundLot(tierLot * t.lotMult);
+      } else {
+        lot = roundLot(baseLot * t.weight * scale);
+      }
+      if (t.floorLot != null && lot < t.floorLot) lot = t.floorLot;
+      return { ...t, lot };
+    });
+  }
+
+  // ========== 保有状況の判定(2026-09-29 app.js から移動) ==========
+  // アプリは EA の内部状態を持たないので、利用者が記録した建玉(positions)で EA の判定を代用する。
+  // すべて positions を引数に取る純粋関数。画面(app.js)と再生テストの両方がこれを呼ぶ。
+  //   positions: [{ symbol, timeframe:"daily"|"weekly", direction, isSatellite, kind, pair,
+  //                 entryDate, tranches:[{ closed, exitDate }] }]
+
+  // ピンバー反転(noConflict)の層は衝突ゲートに参加しない(数えもしないし、数えられもしない)
+  const NO_CONFLICT_LAYERS = new Set(SATELLITES.filter((s) => s.noConflict).map((s) => s.id));
+
+  function isOpen(p) {
+    return p.tranches.some((t) => !t.closed);
+  }
+
+  // EA の AnyOpen()/WDAnyOpen() 相当。同じペア・時間軸・方向のトランシェが1つでも未決済なら新規なし。
+  // 衛星も timeframe:"daily" で記録されるので isSatellite を除外する(2026-09-25 のバグの原因)。
+  function hasOpenCore(positions, symbol, timeframe, direction) {
+    return positions.some((p) => !p.isSatellite && p.symbol === symbol && p.timeframe === timeframe &&
+      p.direction === direction && isOpen(p));
+  }
+
+  // EA の衛星は1層1スロット。埋まっている間は方向を問わず新規判定しない。
+  function openSatellitePositions(positions, kind) {
+    return positions.filter((p) => p.isSatellite && p.kind === kind && isOpen(p));
+  }
+
+  // EA が同じ朝(+90分の同じティック)に衛星を処理する順番(GetSingleTick の Run*Signal の呼び出し順)。
+  // 衝突ゲートは「その層を判定する時点」で同じペアの他の層を数えるので、同じ朝に
+  //   ・先に処理された層の新規建て は数えられる
+  //   ・先に処理された層の時間切れ決済 は数えられない(もう閉じている)
+  //   ・後で処理される層の時間切れ決済 は数えられる(まだ開いている)
+  // となる(2026-09-29、再生テストで 55/3,087件のロット不一致の原因と判明)。ピンバーは衝突ゲート外。
+  const SAT_EA_ORDER = ["ej-fadeout", "gbp-streak", "gbp-fade", "gbp-outside",
+    "usd-outside", "usd-wstreak", "usd-streak", "aud-outside", "aud-day2"];
+  function eaOrderOf(kind) {
+    const i = SAT_EA_ORDER.indexOf(kind);
+    return i < 0 ? 999 : i;
+  }
+
+  // 建玉の時間切れ予定日。日足の層は営業日で数え、週足ストリークは週単位(火曜→6週後の火曜)。
+  function scheduledExitDate(cfg, entryDate) {
+    if (cfg.holdWeeks) return shiftDate(entryDate, 7 * cfg.holdWeeks);
+    return addTradingDays(entryDate, cfg.holdDays);
+  }
+
+  // 同一ペア上の「他の」衛星のうち、EA がこの層(excludeLayer)を判定する時点で開いているものの方向。
+  // ctx.today(日本時間の日付)と ctx.signals(今朝の全衛星シグナル)があれば、上の処理順を反映する。
+  // 無ければ単純に「いま記録上開いているもの」を数える(旧来の動き)。
+  function openSatelliteDirections(positions, pair, excludeLayer, ctx) {
+    const today = ctx && ctx.today;
+    const myOrder = eaOrderOf(excludeLayer);
+    const dirs = [];
+    for (const p of positions) {
+      if (!p.isSatellite || NO_CONFLICT_LAYERS.has(p.kind) || p.pair !== pair || p.kind === excludeLayer) continue;
+      const before = eaOrderOf(p.kind) < myOrder;
+      const exitsToday = !!today && p.exitDate === today;   // 今朝が時間切れの予定日
+      if (isOpen(p)) {
+        if (before && exitsToday) continue;                  // 先に時間切れで閉じる
+        dirs.push(p.direction);
+      } else if (today && !before && exitsToday &&
+        p.tranches.some((t) => t.closed && t.exitDate === today &&
+          !(t.closedAt && new Date(t.closedAt).getTime() < execInstantJst(today).getTime()))) {
+        // 後で処理される層の時間切れ決済は、この層の判定時点ではまだ開いている。
+        // ただし 7:30 より前に「済」が付いた決済は時間切れではなく前夜の逆指値なので数えない
+        dirs.push(p.direction);
+      }
+    }
+    // 今朝、先に処理される層が新規に建てるもの
+    if (ctx && ctx.signals) {
+      for (const o of ctx.signals) {
+        if (!o.direction || o.pair !== pair || o.layer === excludeLayer || o.noConflict) continue;
+        if (eaOrderOf(o.layer) >= myOrder) continue;
+        if (satelliteStatus(positions, o, today) === "fresh") dirs.push(o.direction);
+      }
+    }
+    return dirs;
+  }
+
+  // 衝突ゲート適用後の発注ロット。プレビューと記録が必ず同じ値を使うよう1か所だけに置く。
+  // ctx = { today, signals }(今朝の全衛星シグナル)を渡すと EA の処理順を反映する。
+  function satelliteLotFor(positions, sig, scale, ctx) {
+    const openDirs = sig.noConflict ? [] : openSatelliteDirections(positions, sig.pair, sig.layer, ctx);
+    const mult = sig.noConflict ? 1.0 : satelliteConflictMult(sig.pair, sig.direction, openDirs);
+    return { lot: roundLot(sig.lot * scale * mult), mult, openDirs };
+  }
+
+  function takenSince(positions, pred, fromDate) {
+    return positions.some((p) => pred(p) && p.entryDate && p.entryDate >= fromDate);
+  }
+
+  // 日本時間 day の執行時刻(日足確定 NY17:00 の90分後 = 夏7:30 / 冬8:30)
+  function execInstantJst(day) {
+    const [y, m, d] = day.split("-").map(Number);
+    for (const utcHour of [22, 23]) {            // NY17:00 = 前日 21:00 UTC(夏)/ 22:00 UTC(冬)
+      const close = new Date(Date.UTC(y, m - 1, d - 1, utcHour - 1, 0));
+      const h = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", hour12: false }).format(close);
+      if (Number(h) === 17) return new Date(close.getTime() + EXEC_OFFSET_MIN * 60000);
+    }
+    return new Date(Date.UTC(y, m - 1, d, -1, 30)); // 念のため(JST 8:30 相当)
+  }
+
+  // day に決済されたトランシェがあるか。ただし「済」を付けた時刻(closedAt)がその日の執行時刻より前なら、
+  // 決済自体も執行時刻より前だと分かるので数えない(2026-09-29、再生テストで7:30時点の要確認391件の原因)。
+  function closedOnDay(positions, pred, day) {
+    const execAt = execInstantJst(day).getTime();
+    return positions.some((p) => pred(p) && p.tranches.some((t) =>
+      t.closed && t.exitDate === day && !(t.closedAt && new Date(t.closedAt).getTime() < execAt)));
+  }
+
+  // シグナルに対する状態を1つに決める。画面はこれを表示するだけ。
+  //   "open"        … 同じ枠を保有中。EA は新規を取らない(記録しない)
+  //   "taken"       … このシグナルは記録済み(決済済みでも)。EA は同じ足/同じ週で建て直さない
+  //   "closedToday" … 前の建玉を執行日に決済した。7:30(冬8:30)より前の決済なら有効、後なら EA は見送り。
+  //                   衛星の時間切れ決済は 7:30 に起きてその足は新規判定しないので必ず見送り
+  //   "fresh"       … 新規に建てる
+  // 日足(コア日足・日足衛星)の執行日 = 判定根拠の最後の足(refBarDate)の翌営業日。
+  // 週足(コア週足・USDWeeklyStreak)は週に1回の判定なので、今週(月曜始まり)に記録したかで見る。
+  function entryStatus(positions, pred, hasOpenNow, opts) {
+    if (hasOpenNow) return "open";
+    const today = opts.today;
+    if (opts.weekly) {
+      if (takenSince(positions, pred, weekKeyOf(today))) return "taken";
+      if (closedOnDay(positions, pred, today)) return "closedToday";
+      return "fresh";
+    }
+    if (!opts.refBarDate) return "fresh";
+    const execDay = addTradingDays(opts.refBarDate, 1);
+    if (takenSince(positions, pred, execDay)) return "taken";
+    if (closedOnDay(positions, pred, execDay)) return "closedToday";
+    return "fresh";
+  }
+
+  function coreDailyStatus(positions, symbol, direction, refBarDate, today) {
+    const same = (p) => !p.isSatellite && p.symbol === symbol && p.timeframe === "daily" && p.direction === direction;
+    return entryStatus(positions, same, hasOpenCore(positions, symbol, "daily", direction), { refBarDate, today });
+  }
+
+  // 週足は新規判定日(直前の確定足が月曜)にしか記録しないので、それ以外の日は "open" 以外を気にしない
+  function coreWeeklyStatus(positions, symbol, direction, today, isNewToday) {
+    const same = (p) => !p.isSatellite && p.symbol === symbol && p.timeframe === "weekly" && p.direction === direction;
+    const open = hasOpenCore(positions, symbol, "weekly", direction);
+    if (open || !isNewToday) return open ? "open" : "fresh";
+    return entryStatus(positions, same, false, { weekly: true, today });
+  }
+
+  // 衛星は方向を問わず同じ層で判定する(1層1スロット)
+  function satelliteStatus(positions, sig, today) {
+    const same = (p) => p.isSatellite && p.kind === sig.layer;
+    const open = openSatellitePositions(positions, sig.layer).length > 0;
+    return entryStatus(positions, same, open, { weekly: !!sig.weekly, refBarDate: sig.referenceDate, today });
+  }
+
   // 画面右上などにアプリの版(sw.js の CACHE_NAME の末尾 vNN)を表示する。
   // 動いている Service Worker に問い合わせるので、表示は「実際に使われている版」になる。
   // SW がまだ制御していない初回や非対応環境では何も出さない。
@@ -1430,6 +1668,22 @@
     PAIRS,
     EXTRA_PAIRS,
     showAppVersion,
+    analyzeBars,
+    DAILY_TRANCHES,
+    WEEKLY_TRANCHES,
+    BASE_LOT_DAILY,
+    BASE_LOT_WEEKLY,
+    roundLot,
+    tranchesWithLots,
+    hasOpenCore,
+    openSatellitePositions,
+    openSatelliteDirections,
+    satelliteLotFor,
+    scheduledExitDate,
+    execInstantJst,
+    coreDailyStatus,
+    coreWeeklyStatus,
+    satelliteStatus,
     ALL_PAIRS,
     SATELLITES,
     CORE_LOTS,

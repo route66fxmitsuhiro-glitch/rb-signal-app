@@ -49,40 +49,19 @@ const {
   officialWeeks,
   previewWeeks,
   computeWeeklySignal,
+  DAILY_TRANCHES,
+  WEEKLY_TRANCHES,
+  BASE_LOT_DAILY,
+  BASE_LOT_WEEKLY,
+  roundLot,
+  tranchesWithLots,
 } = SignalCore;
 
 // ========== 設定値(EAの実装に合わせた固定値) ==========
+// トランシェ配分(DAILY_TRANCHES/WEEKLY_TRANCHES)・基準ロット・roundLot・tranchesWithLots と、
+// 保有状況の判定(新規/保有中/記録済み/要確認)は signal-core.js に移した(2026-09-29、
+// 再生テスト scripts/replay_app_state_v5.py が同じコードを動かせるようにするため)。
 
-// 日足RideThin。targetR=nullは目標なし(ride、反対ブレイクのみ+ハードストップ)。
-// CoreAlloc(2026-09-13、PF構造監査ステージ4、A+確定): トランシェ配分を
-// 重み比率(LotSize×weight×DailyRideLotMult)方式から、CoreT0Lot〜CoreT4Lotの
-// 直接指定(T0=0.03/T1=0.03/T2=0.02/T3=0.01/T4=0.01、合計0.10は不変)に変更。
-// EJF075(旧配分T0=0.02/T1=0.02/T2=0.03/T3=0.02/T4=0.01)比でprofit+0.07%・
-// PF+0.0117・DD-1.07%・RDD+1.15%を実機確認済み(23本フルA+再認証も合格)。
-// weightは「baseLot(0.10)に対する比率」として表現(tranchesWithLotsの既存の
-// 計算式 lot=roundLot(baseLot*weight*scale) をそのまま流用するため)。
-// rideはDailyRideLotMult=1.0(CoreT4Lot=0.01が既にpre-shrinkの最終値)なので
-// lotMultは使わず、floorLot=0.01のみ残す(念のための安全床)。
-const DAILY_TRANCHES = [
-  { name: "T0", weight: 0.30, targetR: 0.1 },
-  { name: "T1", weight: 0.30, targetR: 0.2 },
-  { name: "T2", weight: 0.20, targetR: 0.3 },
-  { name: "T3", weight: 0.10, targetR: 0.5 },
-  { name: "ride", weight: 0.10, targetR: null, hardStopR: -1.0, floorLot: 0.01 },
-];
-
-// 週足ドンチャン(3階層)。Rはブレイク幅そのもの(ATRではない)。rideにハードストップなし(教訓34)。
-// balanced(2026-09-10): WDT01LotMult=0.334 / WDRideLotMult=0.167。
-// EAは tierLot = RoundLot(WDLotSize/3) = RoundLot(0.10/3) = 0.03 を作り、
-// T0/T1 に ×0.334(→0.01)、ride に ×0.167(→0.01)を掛けて再度丸め、0.01で床止め。
-const WEEKLY_TRANCHES = [
-  { name: "T0", weight: 1 / 3, targetR: 0.5, lotMult: 0.334, floorLot: 0.01 },
-  { name: "T1", weight: 1 / 3, targetR: 1.0, lotMult: 0.334, floorLot: 0.01 },
-  { name: "ride", weight: 1 / 3, targetR: null, lotMult: 0.167, floorLot: 0.01 },
-];
-
-const BASE_LOT_DAILY = 0.10;   // バックテスト基準ロット(1ペアあたり)
-const BASE_LOT_WEEKLY = 0.10;  // バックテスト基準ロット(1ペアあたり)
 // 実データの最大DD(口座通貨USD想定、0.10ロット基準)。
 // 【重要】このアプリはコア(日足RideThin+週足ドンチャン)のみを実装しており、
 // RB_Broker_CoreAlloc_Test全体(コア+9衛星レイヤー)のDD(2,655.40)ではなく、
@@ -129,6 +108,14 @@ function loadPositions() {
       if (!p.pair) p.pair = (p.symbol || "").replace("/", "");
       migrated = true;
     }
+    // 週足ストリーク(保有は週単位)の時間切れ予定日が建てた当日になっていた不具合の修正
+    // (2026-09-29。holdDays が無いため addTradingDays(entryDate, undefined) = entryDate になっていた)
+    if (p.isSatellite && p.kind === "usd-wstreak" && p.entryDate && (!p.exitDate || p.exitDate <= p.entryDate)) {
+      const cfg = SATELLITES.find((c) => c.id === "usd-wstreak");
+      p.holdWeeks = cfg.holdWeeks;
+      p.exitDate = SignalCore.scheduledExitDate(cfg, p.entryDate);
+      migrated = true;
+    }
   }
   if (migrated) savePositions(list);
   return list;
@@ -155,31 +142,6 @@ function effectiveUsdJpy(settings) {
 function lotScaleFactor(settings) {
   const ddBudgetUsd = (settings.capitalJpy / effectiveUsdJpy(settings)) * (settings.ddPct / 100);
   return ddBudgetUsd / REFERENCE_MAX_DD_USD;
-}
-
-// EAのRoundLot()と完全に同じ式(floor(lot*100+0.5)/100、round-half-up)。
-// 最小0.01への強制はしない — 実際のEAもスケールが小さすぎて0.005未満に
-// 丸まった場合は0を返し、そのトランシェは発注されない(教訓67のロット丸め
-// 誤差の議論と同じ挙動)。
-function roundLot(v) {
-  return Math.floor(v * 100 + 0.5) / 100;
-}
-
-function tranchesWithLots(tranches, baseLot, scale) {
-  return tranches.map((t) => {
-    let lot;
-    if (t.lotMult != null) {
-      // EA互換の2段階: tierLot = RoundLot(baseLot*weight) を作ってから
-      // lotMult を掛けて再度丸める。EAは最後に0.01で床止めする
-      // (これが無いと多重適用で0.00になり発注が失敗する。教訓48の失敗パターン)。
-      const tierLot = roundLot(baseLot * t.weight * scale);
-      lot = roundLot(tierLot * t.lotMult);
-    } else {
-      lot = roundLot(baseLot * t.weight * scale);
-    }
-    if (t.floorLot != null && lot < t.floorLot) lot = t.floorLot;
-    return { ...t, lot };
-  });
 }
 
 // ========== ポジション(保有トランシェ)モデル ==========
@@ -210,36 +172,10 @@ function buildPositionRecord(pairLabel, symbol, timeframe, direction, entryPrice
   };
 }
 
-// 同一シンボル(cfg.pair)上で現在保有中の「他の」衛星レイヤーの方向一覧を返す。
-// EAの ConflictLotMult() は同一ティック内で既存ハンドルの方向を直接見るが、
-// このアプリはEAの内部状態を持たないため、ユーザーが記録済みの未決済ポジション
-// (isSatellite=true のもの)で代用判定する。excludeLayer は今まさに判定中の
-// レイヤー自身(hasOpenSatellite()により通常は未保有のはずだが念のため除外)。
-// ピンバー反転(noConflict)の層は衝突ゲートに参加しないので、数える対象から外す。
-const NO_CONFLICT_LAYERS = new Set(SATELLITES.filter((s) => s.noConflict).map((s) => s.id));
-
-function openSatelliteDirections(pair, excludeLayer) {
-  return state.positions
-    .filter(
-      (p) =>
-        p.isSatellite &&
-        !NO_CONFLICT_LAYERS.has(p.kind) &&
-        p.pair === pair &&
-        p.kind !== excludeLayer &&
-        p.tranches.some((t) => !t.closed)
-    )
-    .map((p) => p.direction);
-}
-
-// 衝突ゲート(教訓、2026-09-11確定)適用後の実発注ロットを計算する。
-// シグナルのプレビュー(renderSatelliteBlock)と実際の記録(buildSatelliteRecord)が
-// 必ず同じ値を使うよう、ここに1箇所だけ実装する(教訓: 実装が2箇所に分散すると
-// 必ずどちらかが腐る)。
+// 衝突ゲート適用後の衛星ロット(実装は signal-core.js の satelliteLotFor)。
 function satelliteLot(sig, scale) {
-  // noConflict の層(ピンバー)は衝突ゲートを使わない(EAと同じ)
-  const openDirs = sig.noConflict ? [] : openSatelliteDirections(sig.pair, sig.layer);
-  const mult = sig.noConflict ? 1.0 : satelliteConflictMult(sig.pair, sig.direction, openDirs);
-  return { lot: roundLot(sig.lot * scale * mult), mult, openDirs };
+  // 今朝の全衛星シグナルを渡し、EA の処理順(先に処理される層の新規建て・時間切れ)を衝突ゲートに反映する
+  return SignalCore.satelliteLotFor(state.positions, sig, scale, { today: todayStr(), signals: state.satellites || [] });
 }
 
 // 分散レイヤー(衛星)9層共通の建玉レコード。コアの5トランシェ/週足3階層とは
@@ -272,10 +208,11 @@ function buildSatelliteRecord(sig, entryPrice, scale) {
     R,
     stopMult: sig.stopMult,
     holdDays: sig.holdDays,
+    holdWeeks: sig.holdWeeks,
     fixedStop,
     conflictMult: mult,
     conflictOpenDirections: openDirs.slice(),
-    exitDate: addTradingDays(entryDate, sig.holdDays), // 時間切れ手仕舞い目安(平日カウント)
+    exitDate: SignalCore.scheduledExitDate(sig, entryDate), // 時間切れ手仕舞いの予定日(週足ストリークは週単位)
     tranches: [{ name: "unit", targetR: null, hardStopR: null, lot, closed: false }],
     exitOverride: null,
     orderCheck: {},
@@ -336,71 +273,6 @@ function currentExitLevel(pos, latestStopTrigger) {
 // ========== レンダリング ==========
 
 const state = { settings: loadSettings(), positions: loadPositions(), lastFetch: null, lastResults: null, autoUsdJpy: null, avgER: null, orderShots: [], orderCheckAiMeta: null };
-
-// EAのUSDOutsideレイヤーは専用の建玉スロットを1つだけ持ち、そのスロットが
-// 埋まっている間は新規シグナルを一切評価しない(方向は問わない = 同時に持てる
-// のは1本だけ)。このアプリはEAの内部状態を持たないため、ユーザーが記録済みの
-// 未決済 usd-outside ポジションで代用判定する。
-function openSatellitePositions(kind) {
-  return state.positions.filter(
-    (p) => p.kind === kind && p.tranches.some((t) => !t.closed)
-  );
-}
-function hasOpenSatellite(kind) {
-  return openSatellitePositions(kind).length > 0;
-}
-
-// EAの AnyOpen()/WDAnyOpen() 相当。同じペア・時間軸・方向のトランシェが
-// 1つでも未決済で残っている間、EAは新しいブレイクアウトが成立しても
-// 新規エントリーしない(rideトランシェは反対ブレイクまで長く保有される
-// ため、保有中に同方向のブレイクが再度起きることは珍しくない)。
-// このアプリはEAの内部状態(handle配列)を持たないため、ユーザーが
-// 「保有中トランシェ」に記録している未決済ポジションで代用判定する。
-// コア(日足RideThin・週足ドンチャン)の保有判定。衛星も timeframe:"daily" で記録されるので、
-// isSatellite を除外しないと「同じペアの衛星ショート」をコアの日足ショート保有と誤認する
-// (2026-09-25、コアを全決済した後も「既に保有中」が消えなかったバグの原因)。
-// このシグナルの執行日(判定根拠の最後の足の翌営業日)以降に記録された建玉があるか(決済済みも含む)。
-// EAは1本の足につき判定を1回しかしないので、その日に建てて同じ日に全決済しても、同じ足で建て直さない。
-// 保有判定(hasOpenPosition / hasOpenSatellite)は未決済だけを見るため、これが無いと
-// 「当日中に全トランシェ決済 → 同じシグナルが新規として再表示」になる(2026-09-29 GBPUSD日足で発生)。
-function takenForSignal(pred, refBarDate) {
-  if (!refBarDate) return false;
-  return takenSince(pred, addTradingDays(refBarDate, 1));
-}
-
-// 週足(コア週足・USDWeeklyStreak)版: 今週(月曜始まり)に記録された建玉があるか。
-// 週足の新規判定は週に1回(月曜の足が確定した日)なので、今週建てたものはこの判定のシグナル。
-function takenThisWeek(pred) {
-  return takenSince(pred, weekKeyOf(todayStr()));
-}
-
-// 執行日に決済された同じ方向の建玉があるか(コア日足用)。EA は +90分(7:30/冬8:30)の時点で
-// AnyOpen() を見るので、その建玉が 7:30 より後に決済されたなら EA はこのシグナルを見送っている。
-// アプリは決済の時刻を持たないため、該当するときは利用者に決済時刻の確認を促す(2026-09-29、GBPUSD で発生)。
-function closedOnExecDay(pred, refBarDate) {
-  if (!refBarDate) return false;
-  return closedOnDay(pred, addTradingDays(refBarDate, 1));
-}
-
-// 指定日に決済されたトランシェを持つ建玉があるか(週足・週足ストリークは執行日=今日を渡す)
-function closedOnDay(pred, day) {
-  return state.positions.some((p) => pred(p) && p.tranches.some((t) => t.closed && t.exitDate === day));
-}
-
-function takenSince(pred, fromDate) {
-  return state.positions.some((p) => pred(p) && p.entryDate && p.entryDate >= fromDate);
-}
-
-function hasOpenPosition(symbol, timeframe, direction) {
-  return state.positions.some(
-    (p) =>
-      !p.isSatellite &&
-      p.symbol === symbol &&
-      p.timeframe === timeframe &&
-      p.direction === direction &&
-      p.tranches.some((t) => !t.closed)
-  );
-}
 
 // 【重要】円ペア(pip=0.01)は小数3桁で十分だが、GBPUSD等(pip=0.0001)は
 // 3桁では10pips未満の差を区別できず、例えばT0(0.5R)とT1(1.0R)の目標が
@@ -643,7 +515,7 @@ function renderSatelliteBody(sig, symbol) {
 
   // 保有中の表示はシグナルの有無と無関係に出す(EAはスロットが埋まっている間、
   // このレイヤーの新規判定自体をしない。以前はシグナル成立日にしか出なかった、2026-09-26)
-  const held = openSatellitePositions(sig.layer);
+  const held = SignalCore.openSatellitePositions(state.positions, sig.layer);
   if (held.length) {
     const p = held[0];
     const dirJa = p.direction === "long" ? "ロング" : "ショート";
@@ -665,14 +537,11 @@ function renderSatelliteBody(sig, symbol) {
   const { lot, mult, openDirs } = satelliteLot(sig, scale);
   const stopPips = fmtPips(sig.atr14 * sig.stopMult, symbol);
   const badge = sig.direction === "long" ? "long" : "short";
-  const alreadyOpen = hasOpenSatellite(sig.layer);
-  // 当日に建てて固定逆指値で当日中に決済された場合も、同じ足(週足ストリークは同じ週)では建て直さない
-  const isSameLayer = (p) => p.isSatellite && p.kind === sig.layer;
-  const takenDone = !alreadyOpen &&
-    (sig.weekly ? takenThisWeek(isSameLayer) : takenForSignal(isSameLayer, sig.referenceDate));
-  // 同じ層の前の建玉を執行日に決済した(方向は問わない。EA は1層1スロット)
-  const closedToday = !alreadyOpen && !takenDone &&
-    (sig.weekly ? closedOnDay(isSameLayer, todayStr()) : closedOnExecDay(isSameLayer, sig.referenceDate));
+  // 新規/保有中/記録済み/要確認 の判定は signal-core.js の satelliteStatus(再生テストと共通)
+  const status = SignalCore.satelliteStatus(state.positions, sig, todayStr());
+  const alreadyOpen = status === "open";
+  const takenDone = status === "taken";
+  const closedToday = status === "closedToday";
   const rName = sig.weekly ? "週足ATR14" : "ATR14";
   const timeout = sig.weekly ? `${sig.holdWeeks}週で手仕舞い` : `${sig.holdDays}営業日で手仕舞い`;
   const conflictNote =
@@ -780,10 +649,11 @@ function renderSignals(results) {
       const badge = dsig.direction === "long" ? "long" : "short";
       const scale = lotScaleFactor(state.settings);
       const tranches = tranchesWithLots(DAILY_TRANCHES, BASE_LOT_DAILY, scale);
-      const alreadyOpen = hasOpenPosition(r.symbol, "daily", dsig.direction);
-      const sameCore = (p) => !p.isSatellite && p.symbol === r.symbol && p.timeframe === "daily" && p.direction === dsig.direction;
-      const takenDone = !alreadyOpen && takenForSignal(sameCore, dsig.prevBar.date);
-      const closedToday = !alreadyOpen && !takenDone && closedOnExecDay(sameCore, dsig.prevBar.date);
+      // 新規/保有中/記録済み/要確認 の判定は signal-core.js の coreDailyStatus(再生テストと共通)
+      const status = SignalCore.coreDailyStatus(state.positions, r.symbol, dsig.direction, dsig.prevBar.date, todayStr());
+      const alreadyOpen = status === "open";
+      const takenDone = status === "taken";
+      const closedToday = status === "closedToday";
       html += `
         <div class="pair-meta">
           <span class="badge ${badge}">日足 ${dsig.direction === "long" ? "ロング" : "ショート"}</span>
@@ -864,10 +734,10 @@ function renderSignals(results) {
       // 「前週高値/安値を仮の約定価格とみなした場合のR」を参考値として出す
       // (エントリー記録時に実際の約定価格でこの計算をやり直す)。
       const rApprox = lastWeek.high - lastWeek.low;
-      const alreadyOpenWeekly = hasOpenPosition(r.symbol, "weekly", wsig.direction);
-      const sameWeekly = (p) => !p.isSatellite && p.symbol === r.symbol && p.timeframe === "weekly" && p.direction === wsig.direction;
-      const takenDoneWeekly = !alreadyOpenWeekly && isNewToday && takenThisWeek(sameWeekly);
-      const closedTodayWeekly = !alreadyOpenWeekly && isNewToday && !takenDoneWeekly && closedOnDay(sameWeekly, todayStr());
+      const wstatus = SignalCore.coreWeeklyStatus(state.positions, r.symbol, wsig.direction, todayStr(), isNewToday);
+      const alreadyOpenWeekly = wstatus === "open";
+      const takenDoneWeekly = wstatus === "taken";
+      const closedTodayWeekly = wstatus === "closedToday";
       html += `
         <div class="pair-meta" style="margin-top:10px;">
           <span class="badge ${badge}">週足 ${wsig.direction === "long" ? "ロング" : "ショート"}</span>
@@ -876,7 +746,7 @@ function renderSignals(results) {
           ${alreadyOpenWeekly ? '<span class="badge warn">既に保有中(EAは新規建てしない)</span>' : ""}
           ${takenDoneWeekly ? '<span class="badge ok">記録済み(全トランシェ決済済み)</span>' : ""}
           ${closedTodayWeekly ? '<span class="badge warn">要確認: 前の建玉を本日決済</span>' : ""}
-          ${wsig.entryGuard && wsig.entryGuard.vetoed ? '<span class="badge short">EA新規建て見送り(R≤0)</span>' : ""}
+          ${wsig.entryGuard && wsig.entryGuard.vetoed ? '<span class="badge warn">見送りの見込み(R≤0、7:30の価格で判断)</span>' : ""}
           ${wsig.entryGuard && !wsig.entryGuard.vetoed ? '<span class="badge warn">撤退ラインを一時越え・要注意</span>' : ""}
           R(参考値、約定前の概算)=${fmtPrice(rApprox, r.symbol)}
         </div>
@@ -911,15 +781,17 @@ function renderSignals(results) {
             : takenDoneWeekly
             ? `<p class="section-note">この週のシグナルは記録済みで、全トランシェが決済済みです。
                EAは週に1回しか判定しないので、もう一度記録しないでください。</p>`
-            : isNewToday && wsig.entryGuard && wsig.entryGuard.vetoed
-            ? `<p class="section-note">現値が撤退ライン(前週${wsig.direction === "long" ? "安値" : "高値"})を既に越えているため、
-               EA(v5)はこの週の新規建てを見送ります(<code>r = 火曜7:30の約定価格 − 前週${wsig.direction === "long" ? "安値" : "高値"}</code>が
-               0以下になるため)。記録しないでください。火曜7:30(冬8:30)の時点で撤退ラインの内側に戻っていれば建てる可能性はあります。</p>`
             : isNewToday
             ? `${closedTodayWeekly ? `<p class="section-note"><strong>同じ方向の前の週足建玉を本日決済しています。</strong>
                  その決済が<strong>7:30(冬8:30)より前</strong>ならEAはこのシグナルで新しく建てます(有効)。
                  <strong>7:30より後</strong>なら、EAは7:30の時点でまだ保有中だったので今週は見送ります(記録しない)。
                  ブローカーの約定履歴で決済時刻を確認してください。</p>` : ""}
+               ${wsig.entryGuard && wsig.entryGuard.vetoed ? `<p class="section-note"><strong>直近の足が撤退ラインを越えて引けたので、見送りになる見込みです。</strong>
+                 ただし EA が見るのは 7:30(冬8:30)の価格なので、その時点で内側に戻っていれば建てます
+                 (23年の再生テストで、見送り見込みのうち6回は実際に建てていた)。下の確認で判断してください。</p>` : ""}
+               <p class="section-note"><strong>発注の直前に確認</strong>: 現在値が撤退ライン
+                 (前週${wsig.direction === "long" ? "安値" : "高値"} ${fmtPrice(wsig.direction === "long" ? lastWeek.low : lastWeek.high, r.symbol)})より
+                 ${wsig.direction === "long" ? "上" : "下"}にあること。${wsig.direction === "long" ? "下" : "上"}なら R≤0 なので EA は見送ります(発注しない)。</p>
                <button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
                  data-timeframe="weekly" data-direction="${wsig.direction}"
                  data-prevweekhigh="${lastWeek.high}" data-prevweeklow="${lastWeek.low}" data-ref="${lastWeek.weekKey}">
@@ -1017,7 +889,7 @@ function renderSatelliteCard(pos) {
         : ""
     }
     <div class="pair-meta section-note">
-      時間切れ手仕舞い目安: <strong>${pos.exitDate}</strong>(エントリーから${pos.holdDays}営業日、祝日は未考慮)。
+      時間切れ手仕舞い目安: <strong>${pos.exitDate}</strong>(エントリーから${pos.holdWeeks ? `${pos.holdWeeks}週` : `${pos.holdDays}営業日`}、元日以外の祝日は未考慮)。
       その日の7:30(冬8:30)以降に成行で手仕舞い。利食い指値は置きません。
     </div>
     <table class="tranche-table">
@@ -1166,9 +1038,13 @@ function renderPositions(freshDataBySymbol) {
         const v = parseFloat(input);
         t.exitPrice = v > 0 ? v : null;
         t.exitDate = todayStr();
+        // 「済」を付けた時刻。7:30(冬8:30)より前に付けたなら決済もそれより前と分かり、
+        // 次のシグナルの「要確認」を出さずに済む(signal-core.js の closedOnDay)
+        t.closedAt = new Date().toISOString();
       } else {
         delete t.exitPrice;
         delete t.exitDate;
+        delete t.closedAt;
       }
       t.closed = cb.checked;
       savePositions(state.positions);
@@ -1249,7 +1125,7 @@ function satelliteOrderCheckItems(pos) {
     {
       key: "timeexit",
       checkable: false,
-      label: `時間切れ手仕舞い目安: ${pos.exitDate}(エントリーから${pos.holdDays}営業日)。利食い指値は置かない。`,
+      label: `時間切れ手仕舞い目安: ${pos.exitDate}(エントリーから${pos.holdWeeks ? `${pos.holdWeeks}週` : `${pos.holdDays}営業日`})。利食い指値は置かない。`,
     },
   ];
 }
@@ -2203,38 +2079,15 @@ async function fetchAndRender() {
       barsBySymbol[p.symbol] = got.bars;
       sourceNotes.push(`${p.label}: ${got.note}`);
     }
-    // 2) コア(日足RideThin・週足ドンチャン)の解析は3ペアだけ
-    for (const p of PAIRS) {
-      // 【2026-09-10、ブローカー時間へ移行】日足の区切りがNY17:00になり、
-      // 日曜の立ち上がり足は月曜に吸収されて土日ラベルのバーが存在しなくなった
-      // (FT5のD1キャッシュで実測: 月〜金のみ)。このため旧版の「コア用(日曜足
-      // 破棄)/USDOutside用(日曜足あり)」という2系列の作り分けは不要になり、
-      // 単一の系列でコア日足・週足集計・ERゲートすべてを賄う。
-      // FT5経路のバーは確定済みなので形成中バーの除外も不要(fetched.dropForming)。
-      const bars = barsBySymbol[p.symbol];
-      const weeklySourceBars = bars;
-      const atr14 = computeATR14(bars);
-      const dailySignal = computeDailySignal(bars);
-      const allWeeklyBars = aggregateWeekly(weeklySourceBars);
-      const weeklyBars = officialWeeks(allWeeklyBars);
-      // 直近の完成日足バー(新規判定日=通常火曜なら「月曜の足」)を渡して
-      // entryGuard(EAの r>0 ガードの近似判定)を計算させる。週足と同じ系列(日曜足なし)を使う。
-      const latestDailyBar = weeklySourceBars.length ? weeklySourceBars[weeklySourceBars.length - 1] : null;
-      const weeklySignal = computeWeeklySignal(weeklyBars, latestDailyBar);
-      // 暦の上ではもう金曜まで終わっているがEAはまだ確定として扱っていない
-      // 週がある場合(月曜〜火曜朝によくある)、参考プレビューも計算する。
-      const pvWeeks = previewWeeks(allWeeklyBars);
-      const previewSignal = pvWeeks ? computeWeeklySignal(pvWeeks, latestDailyBar) : null;
-      const r = {
-        symbol: p.symbol,
-        label: p.label,
-        daily: { bars, atr14, signal: dailySignal },
-        weekly: { bars: weeklyBars, signal: weeklySignal, previewSignal },
-        weeklySourceBars, // weeklyBreakdown(日別内訳の診断表示)用。週足H/Lの計算根拠と同じ系列。
-        dataSourceNote: sourceNotes.find((n) => n.startsWith(p.label + ":")) || "",
-      };
+    // 2) 判定(コア3ペアの日足・週足、ER、衛星11層)は signal-core.js の analyzeBars に集約
+    //    (2026-09-29、再生テスト scripts/replay_app_state_v5.py と同じ手順で判定するため)。
+    const an = SignalCore.analyzeBars(barsBySymbol);
+    for (const c of an.core) {
+      const r = Object.assign({}, c, {
+        dataSourceNote: sourceNotes.find((n) => n.startsWith(c.label + ":")) || "",
+      });
       results.push(r);
-      freshBySymbol[p.symbol] = r;
+      freshBySymbol[c.symbol] = r;
     }
     // USD/JPY の前日終値を自動レートとして保持(ロットサイジングのJPY→USD換算用)。
     const ujFresh = freshBySymbol["USD/JPY"];
@@ -2248,17 +2101,8 @@ async function fetchAndRender() {
       }
       if (typeof syncUsdJpyField === "function") syncUsdJpyField();
     }
-    // 分散レイヤー: USDJPYアウトサイドデイ継続。ERゲートはコアと同じ日足系列
-    // (日曜足を残した3ペア日足)から計算する(EAも RunDailySignals 内の同じ系列で
-    // erValue[p] を更新しているため)。
-    const er = computeAvgER(barsBySymbol, 20, 0);       // ERペア上の層が見る現在のER
-    const erPrev = computeAvgER(barsBySymbol, 20, 1);   // AUDJPY/EURJPY上の層が見る前日のER
-    state.avgER = er;
-    // 週足ストリーク(USDWeeklyStreak)用の確定週足と、新しい週の確定判定
-    const usdWeeks = officialWeeks(aggregateWeekly(barsBySymbol["USD/JPY"] || []));
-    const newWeek = lastCompleteBarIsMonday(barsBySymbol["USD/JPY"] || []);
-    state.satellites = computeAllSatellites(
-      barsBySymbol, er, erPrev, { "USD/JPY": usdWeeks }, newWeek);
+    state.avgER = an.er;
+    state.satellites = an.satellites;
 
     state.lastFetch = freshBySymbol;
     state.lastResults = results;
