@@ -374,6 +374,15 @@ function takenThisWeek(pred) {
   return takenSince(pred, weekKeyOf(todayStr()));
 }
 
+// 執行日に決済された同じ方向の建玉があるか(コア日足用)。EA は +90分(7:30/冬8:30)の時点で
+// AnyOpen() を見るので、その建玉が 7:30 より後に決済されたなら EA はこのシグナルを見送っている。
+// アプリは決済の時刻を持たないため、該当するときは利用者に決済時刻の確認を促す(2026-09-29、GBPUSD で発生)。
+function closedOnExecDay(pred, refBarDate) {
+  if (!refBarDate) return false;
+  const execDay = addTradingDays(refBarDate, 1);
+  return state.positions.some((p) => pred(p) && p.tranches.some((t) => t.closed && t.exitDate === execDay));
+}
+
 function takenSince(pred, fromDate) {
   return state.positions.some((p) => pred(p) && p.entryDate && p.entryDate >= fromDate);
 }
@@ -761,15 +770,16 @@ function renderSignals(results) {
       const scale = lotScaleFactor(state.settings);
       const tranches = tranchesWithLots(DAILY_TRANCHES, BASE_LOT_DAILY, scale);
       const alreadyOpen = hasOpenPosition(r.symbol, "daily", dsig.direction);
-      const takenDone = !alreadyOpen && takenForSignal(
-        (p) => !p.isSatellite && p.symbol === r.symbol && p.timeframe === "daily" && p.direction === dsig.direction,
-        dsig.prevBar.date);
+      const sameCore = (p) => !p.isSatellite && p.symbol === r.symbol && p.timeframe === "daily" && p.direction === dsig.direction;
+      const takenDone = !alreadyOpen && takenForSignal(sameCore, dsig.prevBar.date);
+      const closedToday = !alreadyOpen && !takenDone && closedOnExecDay(sameCore, dsig.prevBar.date);
       html += `
         <div class="pair-meta">
           <span class="badge ${badge}">日足 ${dsig.direction === "long" ? "ロング" : "ショート"}</span>
           ${dsig.outside ? '<span class="badge warn">アウトサイド(終値の陽線/陰線で一本化)</span>' : ""}
           ${alreadyOpen ? '<span class="badge warn">既に保有中(EAは新規建てしない)</span>' : ""}
           ${takenDone ? '<span class="badge ok">記録済み(全トランシェ決済済み)</span>' : ""}
+          ${closedToday ? '<span class="badge warn">要確認: 前の建玉を本日決済</span>' : ""}
           ATR14=${fmtPrice(r.daily.atr14, r.symbol)} (R)
         </div>
         <div class="pair-meta">
@@ -801,7 +811,11 @@ function renderSignals(results) {
             : takenDone
             ? `<p class="section-note">このシグナルは記録済みで、全トランシェが決済済みです。
                EAは同じ足で建て直さないので、もう一度記録しないでください。</p>`
-            : `<p class="section-note">7:30(冬8:30)以降に成行でエントリーした後、実際の約定価格を「保有中トランシェ」に記録してください。</p>
+            : `${closedToday ? `<p class="section-note"><strong>同じ方向の前の建玉を本日決済しています。</strong>
+                 その決済が<strong>7:30(冬8:30)より前</strong>ならEAはこのシグナルで新しく建てます(有効)。
+                 <strong>7:30より後</strong>なら、EAは7:30の時点でまだ保有中だったのでこのシグナルを見送ります(記録しない)。
+                 ブローカーの約定履歴で決済時刻を確認してください。</p>` : ""}
+               <p class="section-note">7:30(冬8:30)以降に成行でエントリーした後、実際の約定価格を「保有中トランシェ」に記録してください。</p>
                <button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
                  data-timeframe="daily" data-direction="${dsig.direction}" data-atr="${r.daily.atr14}"
                  data-ref="${dsig.prevBar.date}">
