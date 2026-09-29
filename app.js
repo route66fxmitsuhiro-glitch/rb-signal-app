@@ -365,8 +365,17 @@ function hasOpenSatellite(kind) {
 // 「当日中に全トランシェ決済 → 同じシグナルが新規として再表示」になる(2026-09-29 GBPUSD日足で発生)。
 function takenForSignal(pred, refBarDate) {
   if (!refBarDate) return false;
-  const execDay = addTradingDays(refBarDate, 1);
-  return state.positions.some((p) => pred(p) && p.entryDate && p.entryDate >= execDay);
+  return takenSince(pred, addTradingDays(refBarDate, 1));
+}
+
+// 週足(コア週足・USDWeeklyStreak)版: 今週(月曜始まり)に記録された建玉があるか。
+// 週足の新規判定は週に1回(月曜の足が確定した日)なので、今週建てたものはこの判定のシグナル。
+function takenThisWeek(pred) {
+  return takenSince(pred, weekKeyOf(todayStr()));
+}
+
+function takenSince(pred, fromDate) {
+  return state.positions.some((p) => pred(p) && p.entryDate && p.entryDate >= fromDate);
 }
 
 function hasOpenPosition(symbol, timeframe, direction) {
@@ -644,9 +653,10 @@ function renderSatelliteBody(sig, symbol) {
   const stopPips = fmtPips(sig.atr14 * sig.stopMult, symbol);
   const badge = sig.direction === "long" ? "long" : "short";
   const alreadyOpen = hasOpenSatellite(sig.layer);
-  // 当日に建てて固定逆指値で当日中に決済された場合も、同じ足では建て直さない(週足ストリークは対象外)
-  const takenDone = !alreadyOpen && !sig.weekly &&
-    takenForSignal((p) => p.isSatellite && p.kind === sig.layer, sig.referenceDate);
+  // 当日に建てて固定逆指値で当日中に決済された場合も、同じ足(週足ストリークは同じ週)では建て直さない
+  const isSameLayer = (p) => p.isSatellite && p.kind === sig.layer;
+  const takenDone = !alreadyOpen &&
+    (sig.weekly ? takenThisWeek(isSameLayer) : takenForSignal(isSameLayer, sig.referenceDate));
   const rName = sig.weekly ? "週足ATR14" : "ATR14";
   const timeout = sig.weekly ? `${sig.holdWeeks}週で手仕舞い` : `${sig.holdDays}営業日で手仕舞い`;
   const conflictNote =
@@ -830,12 +840,15 @@ function renderSignals(results) {
       // (エントリー記録時に実際の約定価格でこの計算をやり直す)。
       const rApprox = lastWeek.high - lastWeek.low;
       const alreadyOpenWeekly = hasOpenPosition(r.symbol, "weekly", wsig.direction);
+      const takenDoneWeekly = !alreadyOpenWeekly && isNewToday && takenThisWeek(
+        (p) => !p.isSatellite && p.symbol === r.symbol && p.timeframe === "weekly" && p.direction === wsig.direction);
       html += `
         <div class="pair-meta" style="margin-top:10px;">
           <span class="badge ${badge}">週足 ${wsig.direction === "long" ? "ロング" : "ショート"}</span>
           ${isNewToday ? '<span class="badge warn">本日が新規判定日</span>' : '<span class="badge none">新規判定日は前回の月曜明け(通常火曜)</span>'}
           ${wsig.outside ? '<span class="badge warn">アウトサイド週(前週終値で一本化)</span>' : ""}
           ${alreadyOpenWeekly ? '<span class="badge warn">既に保有中(EAは新規建てしない)</span>' : ""}
+          ${takenDoneWeekly ? '<span class="badge ok">記録済み(全トランシェ決済済み)</span>' : ""}
           ${wsig.entryGuard && wsig.entryGuard.vetoed ? '<span class="badge short">EA新規建て見送り(R≤0)</span>' : ""}
           ${wsig.entryGuard && !wsig.entryGuard.vetoed ? '<span class="badge warn">撤退ラインを一時越え・要注意</span>' : ""}
           R(参考値、約定前の概算)=${fmtPrice(rApprox, r.symbol)}
@@ -868,6 +881,9 @@ function renderSignals(results) {
             ? `<p class="section-note">同じペア・方向のトランシェを既に保有中です。EA(v5)は
                <code>WDAnyOpen()</code>により、そのトランシェが全て決済されるまで同方向の新規シグナルを
                取りません。ここで改めて記録しないでください。</p>`
+            : takenDoneWeekly
+            ? `<p class="section-note">この週のシグナルは記録済みで、全トランシェが決済済みです。
+               EAは週に1回しか判定しないので、もう一度記録しないでください。</p>`
             : isNewToday && wsig.entryGuard && wsig.entryGuard.vetoed
             ? `<p class="section-note">現値が撤退ライン(前週${wsig.direction === "long" ? "安値" : "高値"})を既に越えているため、
                EA(v5)はこの週の新規建てを見送ります(<code>r = 火曜7:30の約定価格 − 前週${wsig.direction === "long" ? "安値" : "高値"}</code>が
