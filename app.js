@@ -874,7 +874,7 @@ function renderSatelliteCard(pos) {
     <div class="pair-head">
       <span class="pair-name">${pos.pairLabel}</span>
       <span class="badge ${badge}">${pos.title || "分散レイヤー"} ${pos.direction === "long" ? "ロング" : "ショート"}</span>
-      ${dueToday ? `<span class="badge warn">${overdue ? "手仕舞い予定日を経過" : "本日が手仕舞い予定日"}</span>` : ""}
+      ${allClosedBadge(pos) || (dueToday ? `<span class="badge warn">${overdue ? "手仕舞い予定日を経過" : "本日が手仕舞い予定日"}</span>` : "")}
     </div>
     <div class="pair-meta">エントリー ${pos.entryDate} @ ${fmtPrice(pos.entryPrice, pos.symbol)} / R(ATR14)=${fmtPrice(pos.R, pos.symbol)}</div>
     ${conflictNote}
@@ -919,11 +919,21 @@ function refreshAfterPositionChange(freshDataBySymbol) {
   if (state.lastResults) renderSignals(state.lastResults);
 }
 
+// 全トランシェ決済済み(今日決済)で、当日だけ表示している建玉の印
+function allClosedBadge(pos) {
+  return pos.tranches.every((t) => t.closed)
+    ? '<span class="badge ok">本日決済済み(明日から非表示)</span>' : "";
+}
+
 function renderPositions(freshDataBySymbol) {
   const container = document.getElementById("positionCards");
   const empty = document.getElementById("noPositions");
   container.innerHTML = "";
-  const openPositions = state.positions.filter((p) => p.tranches.some((t) => !t.closed));
+  // 未決済が残っている建玉に加えて、今日決済したトランシェがある建玉も当日中は表示したままにする
+  // (全部に「済」を付けた直後に消えると、決済価格の見直しやチェックの付け外しができないため。2026-09-30 ユーザー要望)
+  const today = todayStr();
+  const openPositions = state.positions.filter((p) =>
+    p.tranches.some((t) => !t.closed) || p.tranches.some((t) => t.closed && t.exitDate === today));
   empty.classList.toggle("hidden", openPositions.length > 0);
 
   for (const pos of openPositions) {
@@ -962,6 +972,7 @@ function renderPositions(freshDataBySymbol) {
       <div class="pair-head">
         <span class="pair-name">${pos.pairLabel}</span>
         <span class="badge ${badge}">${pos.timeframe === "daily" ? "日足" : "週足"} ${pos.direction === "long" ? "ロング" : "ショート"}</span>
+        ${allClosedBadge(pos)}
       </div>
       <div class="pair-meta">エントリー ${pos.entryDate} @ ${fmtPrice(pos.entryPrice, pos.symbol)} / R=${fmtPrice(pos.R, pos.symbol)}</div>
       <div class="pair-meta">
