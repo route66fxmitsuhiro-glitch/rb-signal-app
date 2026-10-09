@@ -194,30 +194,24 @@ function renderExecution(positions, signals) {
     const hit = positions.find((p) => !used.has(p.id) && layerOf(p) === s.layer && p.symbol === s.symbol &&
       p.direction === s.direction && p.entryDate >= s.date && daysBetween(s.date, p.entryDate) <= 2);
     if (hit) used.add(hit.id);
-    // 建てていないが、同じ枠の前の建玉をこのシグナルの執行日に決済している → EA は7:30の時点で
-    // まだ保有中なら見送る(AnyOpen / 1層1スロット)。アプリは決済時刻を確定できないので「見送り?」として
-    // 実行率から外す(2026-10-09、GBPUSD日足ショートで発生。前の建玉の決済後に判定を取り直すと、
-    // シグナルが「要確認」付きで出て記録ボタン=実行率の対象になっていた)
-    const skipLikely = !hit && positions.some((p) => layerOf(p) === s.layer && p.symbol === s.symbol &&
-      (p.isSatellite || p.direction === s.direction) && p.entryDate < s.date &&
-      (p.tranches || []).some((t) => t.closed && t.exitDate === s.date));
-    return { s, taken: !!hit, skipLikely };
+    return { s, taken: !!hit };
   });
-  const counted = rows.filter((r) => !r.skipLikely);
-  const taken = counted.filter((r) => r.taken).length;
-  const skipped = rows.length - counted.length;
-  let h = `<div class="pair-meta" style="font-size:1.05rem;">出たシグナル ${counted.length}件 / 実行 ${taken}件
-    / 実行率 <b>${pct(counted.length ? taken / counted.length : null)}</b></div>
-    ${skipped ? `<p class="section-note">「見送り?」${skipped}件は数えていません。同じ枠の前の建玉をその日に決済していて、
-      決済が7:30(冬8:30)より後ならEAも見送るシグナルです(7:30より前の決済だったなら実行漏れ)。</p>` : ""}
+  const taken = rows.filter((r) => r.taken).length;
+  if (!rows.length) {
+    el.innerHTML = `<p class="section-note">EAが建てる場面のシグナルはまだありません。</p>`;
+    return;
+  }
+  let h = `<div class="pair-meta" style="font-size:1.05rem;">出たシグナル ${rows.length}件 / 実行 ${taken}件
+    / 実行率 <b>${pct(taken / rows.length)}</b></div>
     <p class="section-note">画面に「このシグナルを記録」ボタンが出たもの(EAなら建てる場面)を数えています。
+      前の建玉が7:30(冬8:30)の時点で残っていた日のシグナルは、EAも建てないので表に出しません。
       記録し忘れも「未実行」に数えるので、実際に建てたものは必ず記録してください。</p>
     <table class="tranche-table">
       <thead><tr><th>日付</th><th>シグナル</th><th>方向</th><th>実行</th></tr></thead><tbody>`;
   for (const r of rows.slice(0, 40)) {
     h += `<tr><td>${r.s.date}</td><td>${LAYER_NAME[r.s.layer] || r.s.layer}(${r.s.symbol})</td>
       <td>${r.s.direction === "long" ? "ロング" : "ショート"}</td>
-      <td>${r.taken ? '<span class="badge ok">済</span>' : r.skipLikely ? '<span class="badge none">見送り?</span>' : '<span class="badge warn">未</span>'}</td></tr>`;
+      <td>${r.taken ? '<span class="badge ok">済</span>' : '<span class="badge warn">未</span>'}</td></tr>`;
   }
   h += `</tbody></table>`;
   if (rows.length > 40) h += `<p class="section-note">直近40件を表示しています(全${rows.length}件)。</p>`;
@@ -469,9 +463,25 @@ function renderSpreadLog() {
   }));
 }
 
+// EA が見送ったシグナルか。建てた記録が無く、同じ枠(コアは同方向、衛星は同じ層)の前の建玉を
+// このシグナルの執行日に決済していて、その決済が7:30(冬8:30)より後なら、EA は7:30の時点で
+// まだ保有中なので建てない(AnyOpen / 1層1スロット)。EA にとってシグナルが無かったのと同じなので、
+// 実行率・レイヤー別の件数から外す(2026-10-09 ユーザー要望。前の建玉の決済後に判定を取り直すと
+// シグナルが「要確認」付きで記録ボタンを出し、ここに記録されていた)。
+// 「済」を付けた時刻(closedAt)が7:30より前なら決済も7:30より前と確定するので、実行漏れとして残す。
+function eaSkippedSignal(s, positions) {
+  const sameSlot = (p) => layerOf(p) === s.layer && p.symbol === s.symbol && (p.isSatellite || p.direction === s.direction);
+  const taken = positions.some((p) => sameSlot(p) && p.entryDate >= s.date && daysBetween(s.date, p.entryDate) <= 2);
+  if (taken) return false;
+  const execAt = SignalCore.execInstantJst(s.date).getTime();
+  return positions.some((p) => sameSlot(p) && p.entryDate < s.date &&
+    (p.tranches || []).some((t) => t.closed && t.exitDate === s.date &&
+      !(t.closedAt && new Date(t.closedAt).getTime() < execAt)));
+}
+
 function renderAll() {
   const positions = loadPositions();
-  const signals = loadSignalLog();
+  const signals = loadSignalLog().filter((s) => !eaSkippedSignal(s, positions));
   const trades = closedTrades(positions);
   renderProtocol(positions, trades, signals);
   renderSpreadLog();
