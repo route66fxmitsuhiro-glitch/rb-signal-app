@@ -1622,7 +1622,7 @@ let pendingEntry = null;
 // その日のシグナルとして残す。ボタンを基準にするので、既に保有中・R≦0で見送り等、
 // EAが建てない場面は自然に除外される。
 function logShownSignals(container) {
-  const day = todayStr();
+  const day = SignalCore.execDayOf(todayStr()); // 週末に取得したら次の営業日の日付で残す
   const entries = [];
   container.querySelectorAll(".record-entry").forEach((btn) => {
     const ds = btn.dataset;

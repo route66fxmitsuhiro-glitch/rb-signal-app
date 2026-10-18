@@ -194,15 +194,17 @@ function renderExecution(positions, signals) {
     const hit = positions.find((p) => !used.has(p.id) && layerOf(p) === s.layer && p.symbol === s.symbol &&
       p.direction === s.direction && p.entryDate >= s.date && daysBetween(s.date, p.entryDate) <= 2);
     if (hit) used.add(hit.id);
-    return { s, taken: !!hit };
+    // 執行日がまだ来ていない(週末に取得した月曜のシグナル等)ものは「予定」とし、実行率に数えない
+    return { s, taken: !!hit, pending: !hit && s.date > todayJst() };
   });
-  const taken = rows.filter((r) => r.taken).length;
+  const done = rows.filter((r) => !r.pending);
+  const taken = done.filter((r) => r.taken).length;
   if (!rows.length) {
     el.innerHTML = `<p class="section-note">EAが建てる場面のシグナルはまだありません。</p>`;
     return;
   }
-  let h = `<div class="pair-meta" style="font-size:1.05rem;">出たシグナル ${rows.length}件 / 実行 ${taken}件
-    / 実行率 <b>${pct(taken / rows.length)}</b></div>
+  let h = `<div class="pair-meta" style="font-size:1.05rem;">出たシグナル ${done.length}件 / 実行 ${taken}件
+    / 実行率 <b>${done.length ? pct(taken / done.length) : "-"}</b></div>
     <p class="section-note">画面に「このシグナルを記録」ボタンが出たもの(EAなら建てる場面)を数えています。
       前の建玉が7:30(冬8:30)の時点で残っていた日のシグナルは、EAも建てないので表に出しません。
       記録し忘れも「未実行」に数えるので、実際に建てたものは必ず記録してください。</p>
@@ -211,7 +213,7 @@ function renderExecution(positions, signals) {
   for (const r of rows.slice(0, 40)) {
     h += `<tr><td>${r.s.date}</td><td>${LAYER_NAME[r.s.layer] || r.s.layer}(${r.s.symbol})</td>
       <td>${r.s.direction === "long" ? "ロング" : "ショート"}</td>
-      <td>${r.taken ? '<span class="badge ok">済</span>' : '<span class="badge warn">未</span>'}</td></tr>`;
+      <td>${r.taken ? '<span class="badge ok">済</span>' : r.pending ? '<span class="badge none">予定</span>' : '<span class="badge warn">未</span>'}</td></tr>`;
   }
   h += `</tbody></table>`;
   if (rows.length > 40) h += `<p class="section-note">直近40件を表示しています(全${rows.length}件)。</p>`;

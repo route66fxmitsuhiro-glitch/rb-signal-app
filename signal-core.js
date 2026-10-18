@@ -305,6 +305,13 @@
     return ymd(d);
   }
 
+  // シグナルを執行する日。週末(土日)や元日に判定を取得したときは、次の営業日(月曜など)の
+  // 7:30(冬8:30)に建てるので、その日を返す。平日はその日のまま(2026-10-18、
+  // 土曜に取得したシグナルが土曜の日付で記録され、フォワード記録で「未」になっていた)。
+  function execDayOf(dateStr) {
+    return addTradingDays(shiftDate(dateStr, -1), 1);
+  }
+
   // 2本のバー(aが時系列で先、bが後)を1本にマージする。dateLabelは呼び出し側が
   // 明示的に指定する。
   // 実質的に値動きがない(高値=安値)バーは、休場日の繰り越しレコードである
@@ -814,7 +821,8 @@
   function loadSignalLog() {
     try {
       const raw = localStorage.getItem(LS_SIGNALLOG);
-      return raw ? JSON.parse(raw) : [];
+      // 週末に記録された古い行も執行日(月曜など)に読み替える
+      return raw ? JSON.parse(raw).map((e) => (e.date ? { ...e, date: execDayOf(e.date) } : e)) : [];
     } catch (e) {
       return [];
     }
@@ -1727,6 +1735,7 @@
     acquireBars,
     dowOf,
     addTradingDays,
+    execDayOf,
     isDegenerateBar,
     fetchFT5Export,
     fetchTwelveDataDaily,
