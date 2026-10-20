@@ -1150,15 +1150,23 @@ function orderCheckItems(pos) {
   const tf = pos.timeframe === "daily" ? "日足" : "週足";
   const dir = pos.direction === "long" ? "ロング(買い)" : "ショート(売り)";
   const nonZero = pos.tranches.filter((t) => t.lot > 0);
+  const live = nonZero.filter((t) => !t.closed);
   const items = [];
 
   items.push({
     key: "entry",
     checkable: true,
-    label: `${tf} ${dir} を成行で ${nonZero.length} 本(別々の建玉)。約定 ≈ ${fmtPrice(pos.entryPrice, pos.symbol)}(スプレッド分ずれます)`,
+    label: `${tf} ${dir} を成行で ${nonZero.length} 本(別々の建玉)。約定 ≈ ${fmtPrice(pos.entryPrice, pos.symbol)}(スプレッド分ずれます)` +
+      (live.length < nonZero.length ? `。うち${nonZero.length - live.length}本は決済済みで、建玉一覧に残っているのは ${live.length} 本` : ""),
   });
 
   for (const t of pos.tranches) {
+    // 決済済みのトランシェは注文(利食い指値・逆指値)も建玉も一覧から消えているので、照合の対象にしない
+    // (2026-10-20。以前は決済後も「利食い指値 @ …」を期待し続け、AI照合が「見当たらず」になっていた)
+    if (t.lot > 0 && t.closed) {
+      items.push({ key: `t:${t.name}`, checkable: false, label: `${t.name}: 決済済み → 注文は一覧から消えていて正常` });
+      continue;
+    }
     if (t.lot <= 0) {
       items.push({ key: `t:${t.name}`, checkable: false, label: `${t.name}: 枚数0 → 発注不要(資金/DD設定でこのトランシェは出ません)` });
       continue;

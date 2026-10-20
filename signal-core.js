@@ -312,6 +312,13 @@
     return addTradingDays(shiftDate(dateStr, -1), 1);
   }
 
+  // 前の営業日から休場日をはさんで始まるセッションか(月曜、元日明けなど)。窓が開きうる。
+  function opensAfterBreak(dateStr) {
+    let p = shiftDate(dateStr, -1);
+    while (execDayOf(p) !== p) p = shiftDate(p, -1);
+    return shiftDate(p, 1) !== dateStr;
+  }
+
   // 2本のバー(aが時系列で先、bが後)を1本にマージする。dateLabelは呼び出し側が
   // 明示的に指定する。
   // 実質的に値動きがない(高値=安値)バーは、休場日の繰り越しレコードである
@@ -702,8 +709,8 @@
     if (bar.rawOpen != null) {
       // 前日終値が当日の値幅の外 = 窓開け。週明けなら普通に起きる。平日に大きく外れるのは誤読を疑う。
       const out = Math.abs(bar.rawOpen - bar.open) / pip;
-      const weekStart = dowOf(bar.date) === 1;
-      const msg = `前日終値 ${bar.rawOpen} が当日の値幅の外(${out.toFixed(1)}pips${weekStart ? "、週明けの窓" : ""})。` +
+      const weekStart = opensAfterBreak(bar.date);
+      const msg = `前日終値 ${bar.rawOpen} が当日の値幅の外(${out.toFixed(1)}pips${weekStart ? "、休場明けの窓" : ""})。` +
         `始値を${bar.open === bar.low ? "安値" : "高値"} ${bar.open} で代用しました。` +
         "ブローカーのチャートで実際の始値を確かめ、違えば「4本値の手動編集」で直してください";
       if (weekStart || out <= 20) warnings.push(msg);
@@ -726,10 +733,10 @@
       const gap = Math.abs(bar.open - prev.close) / pip;
       // 前セッションの終値＝当セッションの始値なので、本来ほぼ一致するはず。
       // 週明け(月曜)だけは週末ギャップで離れうる。
-      const isMonday = dowOf(bar.date) === 1;
+      const isMonday = opensAfterBreak(bar.date); // 月曜・元日明けは休場明けの窓が開きうる
       const limit = isMonday ? (atr ? (atr / pip) * 1.5 : 200) : 20;
       if (gap > limit) {
-        warnings.push(`前日終値との差が${gap.toFixed(0)}pips(${isMonday ? "週明け" : "通常日"}の想定を超過)`);
+        warnings.push(`前日終値との差が${gap.toFixed(0)}pips(${isMonday ? "休場明け" : "通常日"}の想定を超過)`);
       }
     }
     return { errors: errors, warnings: warnings };
@@ -1755,6 +1762,7 @@
     dowOf,
     addTradingDays,
     execDayOf,
+    opensAfterBreak,
     isDegenerateBar,
     fetchFT5Export,
     fetchTwelveDataDaily,
