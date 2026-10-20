@@ -663,15 +663,24 @@
     const dec = quoteDecimals(symbol);
     const unit = Math.pow(10, -dec);
     const round = (v) => Number(v.toFixed(dec));
-    const open = round(q.bid - q.change * unit);
-    return {
+    // 前日比から逆算した値は「前日(月曜なら金曜)の終値」。通常はこれが当日の始値と一致するが、
+    // 週明けは窓が開くので当日の高安の外に出ることがある(2026-10-20、AUDJPY 10/19 で
+    // 金曜終値 109.755 < 月曜の安値 109.860 となりエラーになった)。その場合は始値を
+    // 近い側の高値/安値で代用し、元の値を rawOpen に残す(保存されないよう列挙しない)。
+    const rawOpen = round(q.bid - q.change * unit);
+    const high = round(q.high);
+    const low = round(q.low);
+    const open = low <= high ? Math.min(Math.max(rawOpen, low), high) : rawOpen;
+    const bar = {
       date: dateLabel,
       open: open,
-      high: round(q.high),
-      low: round(q.low),
+      high: high,
+      low: low,
       close: round(q.bid),
       src: "shot",
     };
+    if (open !== rawOpen) Object.defineProperty(bar, "rawOpen", { value: rawOpen, enumerable: false });
+    return bar;
   }
 
   // 再構成したバーの健全性検査。1桁の誤読が履歴に入ると以後ずっと汚染されるため
@@ -690,6 +699,16 @@
       return { errors: errors, warnings: warnings };
     }
     if (bar.high < bar.low) errors.push("高値が安値を下回っています");
+    if (bar.rawOpen != null) {
+      // 前日終値が当日の値幅の外 = 窓開け。週明けなら普通に起きる。平日に大きく外れるのは誤読を疑う。
+      const out = Math.abs(bar.rawOpen - bar.open) / pip;
+      const weekStart = dowOf(bar.date) === 1;
+      const msg = `前日終値 ${bar.rawOpen} が当日の値幅の外(${out.toFixed(1)}pips${weekStart ? "、週明けの窓" : ""})。` +
+        `始値を${bar.open === bar.low ? "安値" : "高値"} ${bar.open} で代用しました。` +
+        "ブローカーのチャートで実際の始値を確かめ、違えば「4本値の手動編集」で直してください";
+      if (weekStart || out <= 20) warnings.push(msg);
+      else errors.push(msg + "(平日に20pips超の窓は誤読の可能性が高いので保存しません)");
+    }
     if (bar.high < Math.max(bar.open, bar.close) - unit / 2) {
       errors.push(`高値が始値/終値より低い(${((Math.max(bar.open, bar.close) - bar.high) / pip).toFixed(1)}pips)`);
     }

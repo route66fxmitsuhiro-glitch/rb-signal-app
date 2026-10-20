@@ -1164,8 +1164,12 @@ function orderCheckItems(pos) {
       continue;
     }
     const tp = targetPrice(pos, t);
+    // ride は利食い指値が無いので、ブローカーの一覧では「撤退ラインの通常逆指値(OCOでない単独)」だけが
+    // 対応する注文になる。それを label に書いておかないと AI 照合が「見当たらず」になる(2026-10-20 GBPUSD 週足)。
     const tail = tp != null
       ? `利食い指値 @ ${fmtPrice(tp, pos.symbol)}`
+      : exit.price != null
+      ? `利食い指値なし(撤退ラインまで保有 = ride)。注文一覧では撤退ライン @ ${fmtPrice(exit.price, pos.symbol)} の通常逆指値(OCOでない単独)がこの建玉の分`
       : `利食い指値なし(撤退ラインまで保有 = ride)`;
     items.push({ key: `t:${t.name}`, checkable: true, label: `${t.name}: ${fmtMai(t.lot)}枚 / ${tail}` });
   }
@@ -1518,6 +1522,11 @@ async function runAiOrderCheck() {
     "(4)価格: 指値/逆指値の価格はlabelの目標価格と数pips以内なら一致。成行/約定済み建玉はエントリー概算価格と近ければ一致。" +
     "(5)スクショから確実に読み取れない場合は unclear。対応する注文がスクショに無ければ not_found。" +
     "値は違うが対応行がある場合は mismatch。" +
+    "(6)「利食い指値なし(ride)」の項目は指値を持たない。同じペア・決済方向の通常逆指値(OCOではない単独の逆指値)が" +
+    "labelの撤退ライン付近・同じ枚数でスクショにあれば、それがrideの注文なので match。" +
+    "(7)「成行で N 本」のエントリー項目: 約定済みの成行注文は注文一覧に残らない。建玉一覧が写っていればそれで照合する。" +
+    "注文一覧しか無い場合は、同じペアの決済注文(状態が決済の指値/逆指値)が他の項目どおりに揃っていれば、" +
+    "建玉は約定済みとみなして match にし、detail にその旨を書く。" +
     "必ず、渡された全項目のkeyについて1件ずつ判定を返してください。" +
     "スクショにあるが期待リストのどれにも対応しない注文は extra_orders に日本語で要約してください。";
 
