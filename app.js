@@ -521,7 +521,9 @@ function renderSatelliteBody(sig, symbol) {
     const dirJa = p.direction === "long" ? "ロング" : "ショート";
     const since = p.entryDate ? `${fmtDay(p.entryDate)}建て` : "";
     const due = p.exitDate ? ` / 時間切れ予定 ${fmtDay(p.exitDate)}` : "";
-    h += `<div class="pair-meta"><span class="badge warn">保有中</span>
+    const dueBadge = p.exitDate && p.exitDate <= todayStr()
+      ? `<span class="badge short">${p.exitDate < todayStr() ? "手仕舞い予定日を経過" : "本日 手仕舞い"}</span>` : "";
+    h += `<div class="pair-meta"><span class="badge warn">保有中</span> ${dueBadge}
       <span class="badge ${p.direction === "long" ? "long" : "short"}">${dirJa}</span> ${since}${due}
       — 決済まで新規は取らない</div>`;
   }
@@ -558,6 +560,9 @@ function renderSatelliteBody(sig, symbol) {
       ${closedToday ? '<span class="badge warn">要確認: 前の建玉を本日決済</span>' : ""}
       ${rName}=${fmtPrice(sig.atr14, symbol)}(R)
     </div>
+    ${!alreadyOpen && !takenDone ? `<div class="record-entry-row"><button class="btn btn-primary btn-small record-entry" data-symbol="${sig.symbol}" data-label="${sig.label}"
+       data-timeframe="daily" data-direction="${sig.direction}" data-layer="${sig.layer}" data-title="${sig.title}"
+       data-ref="${sig.referenceDate || sig.referenceWeek || ""}">このシグナルを記録</button></div>` : ""}
     ${conflictNote}
     <table class="tranche-table">
       <thead><tr><th>枚数</th><th>利食い</th><th>逆指値(固定)</th><th>時間切れ</th></tr></thead>
@@ -580,12 +585,7 @@ function renderSatelliteBody(sig, symbol) {
            <strong>時間切れで決済した</strong>なら、EAはその日は新規判定をしないので<strong>見送り</strong>(記録しない)。
            <strong>逆指値で決済した</strong>なら、7:30(冬8:30)より前の決済なら有効、後なら見送りです。
            ブローカーの約定履歴で決済の理由と時刻を確認してください。</p>` : ""}<p class="section-note">7:30(冬8:30)以降に成行でエントリーした後、実際の約定価格を記録してください
-           (固定逆指値と手仕舞い予定日が計算されます)。</p>
-           <button class="btn btn-primary btn-small record-entry" data-symbol="${sig.symbol}" data-label="${sig.label}"
-             data-timeframe="daily" data-direction="${sig.direction}" data-layer="${sig.layer}" data-title="${sig.title}"
-             data-ref="${sig.referenceDate || sig.referenceWeek || ""}">
-             このシグナルを記録
-           </button>`
+           (固定逆指値と手仕舞い予定日が計算されます)。記録ボタンは上のロング/ショートの下にあります。</p>`
     }
   `;
   return h;
@@ -663,6 +663,9 @@ function renderSignals(results) {
           ${closedToday ? '<span class="badge warn">要確認: 前の建玉を本日決済</span>' : ""}
           ATR14=${fmtPrice(r.daily.atr14, r.symbol)} (R)
         </div>
+        ${!alreadyOpen && !takenDone ? `<div class="record-entry-row"><button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
+           data-timeframe="daily" data-direction="${dsig.direction}" data-atr="${r.daily.atr14}"
+           data-ref="${dsig.prevBar.date}">このシグナルを記録</button></div>` : ""}
         <div class="pair-meta">
           判定根拠: ${fmtDay(dsig.prevPrevBar.date)} 高${fmtPrice(dsig.prevPrevBar.high, r.symbol)}/安${fmtPrice(dsig.prevPrevBar.low, r.symbol)}
           → ${fmtDay(dsig.prevBar.date)} 高${fmtPrice(dsig.prevBar.high, r.symbol)}/安${fmtPrice(dsig.prevBar.low, r.symbol)}(
@@ -696,12 +699,7 @@ function renderSignals(results) {
                  その決済が<strong>7:30(冬8:30)より前</strong>ならEAはこのシグナルで新しく建てます(有効)。
                  <strong>7:30より後</strong>なら、EAは7:30の時点でまだ保有中だったのでこのシグナルを見送ります(記録しない)。
                  ブローカーの約定履歴で決済時刻を確認してください。</p>` : ""}
-               <p class="section-note">7:30(冬8:30)以降に成行でエントリーした後、実際の約定価格を「保有中トランシェ」に記録してください。</p>
-               <button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
-                 data-timeframe="daily" data-direction="${dsig.direction}" data-atr="${r.daily.atr14}"
-                 data-ref="${dsig.prevBar.date}">
-                 このシグナルを記録
-               </button>`
+               <p class="section-note">7:30(冬8:30)以降に成行でエントリーした後、上の「このシグナルを記録」で実際の約定価格を記録してください。</p>`
         }
       `;
     } else if (dsig) {
@@ -750,6 +748,9 @@ function renderSignals(results) {
           ${wsig.entryGuard && !wsig.entryGuard.vetoed ? '<span class="badge warn">撤退ラインを一時越え・要注意</span>' : ""}
           R(参考値、約定前の概算)=${fmtPrice(rApprox, r.symbol)}
         </div>
+        ${!alreadyOpenWeekly && !takenDoneWeekly && isNewToday ? `<div class="record-entry-row"><button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
+           data-timeframe="weekly" data-direction="${wsig.direction}"
+           data-prevweekhigh="${lastWeek.high}" data-prevweeklow="${lastWeek.low}" data-ref="${lastWeek.weekKey}">このシグナルを記録</button></div>` : ""}
         ${weeklyGuardHtml(wsig.entryGuard, r.symbol)}
         <p class="section-note">
           実際のR = 約定価格 - 前週安値(ロング)/前週高値 - 約定価格(ショート)。
@@ -791,12 +792,7 @@ function renderSignals(results) {
                  (23年の再生テストで、見送り見込みのうち6回は実際に建てていた)。下の確認で判断してください。</p>` : ""}
                <p class="section-note"><strong>発注の直前に確認</strong>: 現在値が撤退ライン
                  (前週${wsig.direction === "long" ? "安値" : "高値"} ${fmtPrice(wsig.direction === "long" ? lastWeek.low : lastWeek.high, r.symbol)})より
-                 ${wsig.direction === "long" ? "上" : "下"}にあること。${wsig.direction === "long" ? "下" : "上"}なら R≤0 なので EA は見送ります(発注しない)。</p>
-               <button class="btn btn-primary btn-small record-entry" data-symbol="${r.symbol}" data-label="${r.label}"
-                 data-timeframe="weekly" data-direction="${wsig.direction}"
-                 data-prevweekhigh="${lastWeek.high}" data-prevweeklow="${lastWeek.low}" data-ref="${lastWeek.weekKey}">
-                 このシグナルを記録
-               </button>`
+                 ${wsig.direction === "long" ? "上" : "下"}にあること。${wsig.direction === "long" ? "下" : "上"}なら R≤0 なので EA は見送ります(発注しない)。</p>`
             : `<p class="section-note">本日は新規判定日ではありません。既にエントリー済みなら記録不要、
                まだなら次の月曜明け(通常火曜)を待ってください。</p>`
         }
@@ -862,6 +858,8 @@ function renderSatelliteCard(pos) {
   const today = todayStr();
   const dueToday = today >= pos.exitDate;
   const overdue = today > pos.exitDate;
+  const dueOpen = dueToday && !t.closed;
+  if (dueOpen) card.classList.add("exit-due-card");
 
   const mult = pos.conflictMult;
   const conflictNote =
@@ -876,6 +874,9 @@ function renderSatelliteCard(pos) {
       <span class="badge ${badge}">${pos.title || "分散レイヤー"} ${pos.direction === "long" ? "ロング" : "ショート"}</span>
       ${allClosedBadge(pos) || (dueToday ? `<span class="badge warn">${overdue ? "手仕舞い予定日を経過" : "本日が手仕舞い予定日"}</span>` : "")}
     </div>
+    ${dueOpen ? `<div class="exit-due-inline">${overdue
+      ? `手仕舞い予定日(${pos.exitDate})を過ぎています。すぐに成行で決済し、下の「済」にチェック。`
+      : "本日が手仕舞い日です。7:30(冬8:30)以降に成行で決済し、下の「済」にチェック。"}</div>` : ""}
     <div class="pair-meta">エントリー ${pos.entryDate} @ ${fmtPrice(pos.entryPrice, pos.symbol)} / R(ATR14)=${fmtPrice(pos.R, pos.symbol)}</div>
     ${conflictNote}
     <div class="pair-meta">
@@ -925,7 +926,40 @@ function allClosedBadge(pos) {
     ? '<span class="badge ok">本日決済済み(明日から非表示)</span>' : "";
 }
 
+// 分散レイヤーの時間切れ手仕舞いを画面の一番上に出す(2026-10-24、USDJPYstreak の決済漏れを受けて)。
+// 判定の取得を押さなくても、保有記録だけで出る。「済」を付ければ消える。前営業日には予告を出す。
+function renderExitDueBanner() {
+  const el = document.getElementById("exitDueBanner");
+  if (!el) return;
+  const today = todayStr();
+  const nextDay = SignalCore.addTradingDays(today, 1);
+  const live = state.positions.filter((p) => p.isSatellite && p.exitDate && p.tranches.some((t) => !t.closed));
+  const due = live.filter((p) => p.exitDate <= today).sort((a, b) => (a.exitDate < b.exitDate ? -1 : 1));
+  const soon = live.filter((p) => p.exitDate > today && p.exitDate <= nextDay);
+  const name = (p) => `${p.pairLabel} ${p.title || "分散レイヤー"} ${p.direction === "long" ? "ロング" : "ショート"}`
+    + ` ${fmtMai(p.tranches.filter((t) => !t.closed).reduce((s, t) => s + t.lot, 0))}枚`;
+  if (!due.length && !soon.length) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+  el.classList.remove("hidden");
+  el.classList.toggle("soft", !due.length);
+  let h = "";
+  if (due.length) {
+    h += `<div class="exit-due-title">⚠ ${due.some((p) => p.exitDate < today) ? "手仕舞い漏れあり" : "本日 手仕舞い"}(時間切れ決済) ${due.length}件</div><ul>`;
+    for (const p of due) {
+      h += `<li><strong>${name(p)}</strong><br>${p.exitDate < today
+        ? `<b>予定日(${fmtDay(p.exitDate)})を過ぎています。</b>すぐに成行で決済してください。`
+        : "7:30(冬8:30)以降に成行で決済。"}決済したら保有中トランシェで「済」にチェック。</li>`;
+    }
+    h += `</ul>`;
+    if (soon.length) h += `<div class="exit-due-next">次の営業日(${fmtDay(nextDay)})に手仕舞い: ${soon.map(name).join(" / ")}</div>`;
+  } else {
+    h += `<div class="exit-due-title">次の営業日(${fmtDay(nextDay)})に手仕舞い ${soon.length}件</div><ul>`
+      + soon.map((p) => `<li>${name(p)} — ${fmtDay(nextDay)} 7:30(冬8:30)以降に成行で決済</li>`).join("") + `</ul>`;
+  }
+  el.innerHTML = h;
+}
+
 function renderPositions(freshDataBySymbol) {
+  renderExitDueBanner();
   const container = document.getElementById("positionCards");
   const empty = document.getElementById("noPositions");
   container.innerHTML = "";

@@ -679,3 +679,30 @@ h2 {
 /* ヘッダーの版表示(2026-09-29) */
 .app-version { margin-left: auto; margin-right: 8px; font-family: var(--mono); font-size: 0.72rem; color: var(--text-dim);
   border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; align-self: center; white-space: nowrap; }
+
+/* 分散レイヤーの時間切れ手仕舞い(2026-10-24、USDJPYstreak の決済漏れを受けて目立たせる) */
+.exit-due {
+  background: var(--negative-soft);
+  border: 2px solid var(--negative);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin: 0 0 12px;
+  color: var(--text);
+  line-height: 1.6;
+}
+.exit-due-title { font-size: 1.05rem; font-weight: 800; color: var(--negative); margin-bottom: 6px; }
+.exit-due ul { margin: 0; padding-left: 1.2em; display: grid; gap: 6px; }
+.exit-due li strong { font-size: 1rem; }
+.exit-due .exit-due-next { margin-top: 8px; font-size: 0.82rem; color: var(--text-dim); }
+.exit-due.soft { background: var(--accent-soft); border: 1px solid var(--accent); }
+.exit-due.soft .exit-due-title { color: var(--text); font-size: 0.9rem; }
+.pair-card.exit-due-card { border: 2px solid var(--negative); }
+.exit-due-inline {
+  background: var(--negative-soft);
+  border-left: 4px solid var(--negative);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 6px 0;
+  font-weight: 700;
+}
+.record-entry-row { margin: 6px 0 8px; }
