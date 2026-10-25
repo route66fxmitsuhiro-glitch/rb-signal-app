@@ -65,6 +65,7 @@ FT5_TESTING = r"C:\ForexTester5\data\Testing"
 #   USDJPY … コア日足/週足・USDOutside・USDJPYstreak・USDWeeklyStreak・ERゲート
 #   AUDJPY … AUDoutside・AUDday2fail
 #   EURJPY … EURJPYfadeOut
+#   EURUSD … v6 候補(記録のみ)のアウトサイド継続
 # CHFJPY は現構成でどの層も使っていないため対象外。
 PAIRS = {
     "GBP/JPY": "GBPJPY",
@@ -72,6 +73,7 @@ PAIRS = {
     "USD/JPY": "USDJPY",
     "AUD/JPY": "AUDJPY",
     "EUR/JPY": "EURJPY",
+    "EUR/USD": "EURUSD",   # v6 候補(記録のみ)の EURUSD アウトサイド継続(2026-10-25)
 }
 
 # 書き出す日足の本数。一番長い前提は週足ATR14(15本の週足 ≒ 75営業日)なので

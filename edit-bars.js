@@ -29,7 +29,7 @@ const {
 const N_DAYS = 10; // 「過去1週間」より少し広めに表示しておく
 const PAIR_LABEL = {
   "GBP/JPY": "GBPJPY", "GBP/USD": "GBPUSD", "USD/JPY": "USDJPY",
-  "AUD/JPY": "AUDJPY", "EUR/JPY": "EURJPY",
+  "AUD/JPY": "AUDJPY", "EUR/JPY": "EURJPY", "EUR/USD": "EURUSD",
 };
 const FIELDS = ["open", "high", "low", "close"];
 const SRC_LABEL = { ft5: "FT5", shot: "手動/スクショ", td: "TD補完" };

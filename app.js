@@ -838,10 +838,60 @@ function renderSignals(results) {
     }
   }
 
+  // v6 候補(記録のみ)は記録ボタンを持たないので、v5 のフォワード記録(logShownSignals)には入らない
+  const shadowCard = renderShadowCard();
+  if (shadowCard) container.appendChild(shadowCard);
+
   container.querySelectorAll(".record-entry").forEach((btn) => {
     btn.addEventListener("click", () => openEntryModal(btn.dataset));
   });
   logShownSignals(container);
+}
+
+// v6 候補(EURUSD アウトサイド継続、FT5 実機で確認済み・docs/history/16 §12)。v5 のフォワード中は建てず、
+// シグナルと日足からの仮想の成績だけを表示する(2026-10-25 ユーザー了承)。
+function renderShadowCard() {
+  const sigs = state.shadow || [];
+  if (!sigs.length) return null;
+  const card = document.createElement("div");
+  card.className = "card shadow-card";
+  const log = SignalCore.loadShadowLog();
+  let h = `<h2>v6候補 <span class="section-note">記録のみ・建てない(v5 のフォワード判定 1,000件の後に採用予定)</span></h2>`;
+  for (const sig of sigs) {
+    const cfg = SignalCore.SHADOW_LAYERS.find((c) => c.id === sig.layer);
+    h += `<div class="sat-block"><div class="sat-head"><span class="sat-name">${sig.label}</span>
+      <span class="sat-title">${sig.title}(EUR/USD)</span></div>`;
+    if (sig.insufficientData) {
+      h += `<div class="pair-meta">データ不足(EUR/USD の確定バーが足りません。毎朝のスクショ取り込みで貯まります)</div>`;
+    } else {
+      const gateTxt = sig.gateReady
+        ? `ER ${sig.avgER.toFixed(3)}(${sig.erThreshold} 以下で有効 → ${sig.gateOpen ? "ゲート開" : "ゲート閉"})`
+        : "ER の計算待ち";
+      h += `<div class="pair-meta">${sig.direction
+        ? `<span class="badge ${sig.direction === "long" ? "long" : "short"}">${sig.direction === "long" ? "ロング" : "ショート"}</span> 本日シグナルあり(自動で記録済み・建てない)`
+        : `<span class="badge none">本日シグナルなし</span>`} / ${gateTxt}</div>`;
+    }
+    const bars = (state.shadowBars && state.shadowBars[cfg.symbol]) || [];
+    const ev = SignalCore.evaluateShadowLog(log, bars, cfg);
+    if (ev.rows.length) {
+      h += `<div class="pair-meta">決済 ${ev.closed}件 / 勝ち ${ev.wins}件 / 合計 <b>${ev.pips >= 0 ? "+" : ""}${ev.pips.toFixed(1)}pips</b>
+        (0.10ロットなら約 ${ev.pips >= 0 ? "+" : "−"}$${Math.abs(ev.pips).toFixed(0)})</div>
+        <div style="overflow-x:auto;"><table class="tranche-table"><thead><tr><th>判定の足</th><th>方向</th><th>状態</th><th>pips</th></tr></thead><tbody>`;
+      for (const r of ev.rows.slice(-10).reverse()) {
+        h += `<tr><td>${fmtDay(r.ref)}</td><td>${r.direction === "long" ? "ロング" : "ショート"}</td>
+          <td>${r.status}${r.exitDate ? `(${fmtDay(r.exitDate)})` : ""}</td>
+          <td>${r.pips == null ? "-" : `${r.pips >= 0 ? "+" : ""}${r.pips.toFixed(1)}`}</td></tr>`;
+      }
+      h += `</tbody></table></div>`;
+    } else {
+      h += `<p class="section-note">まだ記録はありません(シグナルが出ると自動で記録されます)。</p>`;
+    }
+    h += `<p class="section-note">損益は日足からの概算です(建て値 = 執行日の始値。実際は 7:30 の価格なので少しずれます)。
+      損切り ${cfg.stopMult}×ATR14、${cfg.holdDays}営業日で時間切れ、スプレッド ${cfg.spreadPips}pips を差し引き。
+      バックテストの目安: 年8件前後、1件平均 +30pips 前後。</p></div>`;
+  }
+  card.innerHTML = h;
+  return card;
 }
 
 // USDJPYアウトサイドデイ継続の保有カード。固定逆指値 + 時間切れ手仕舞い日を表示。
@@ -2165,6 +2215,10 @@ async function fetchAndRender() {
     }
     state.avgER = an.er;
     state.satellites = an.satellites;
+    // v6 候補(記録のみ・建てない)。シグナルが出た日は自動で端末に残す(v5 の記録・実行率とは別)
+    state.shadow = an.shadow || [];
+    state.shadowBars = barsBySymbol;
+    for (const sg of state.shadow) SignalCore.appendShadowLog(sg);
 
     state.lastFetch = freshBySymbol;
     state.lastResults = results;

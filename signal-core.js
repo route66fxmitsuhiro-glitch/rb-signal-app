@@ -32,9 +32,11 @@
   const EXTRA_PAIRS = [
     { symbol: "AUD/JPY", label: "AUDJPY" },
     { symbol: "EUR/JPY", label: "EURJPY" },
+    // v6 候補(記録のみ、2026-10-25)。v5 の判定・ロットには使わない(SHADOW_LAYERS 参照)。
+    { symbol: "EUR/USD", label: "EURUSD" },
   ];
 
-  // データ取得の対象(コア3 + 追加2)。
+  // データ取得の対象(コア3 + 追加3)。
   const ALL_PAIRS = PAIRS.concat(EXTRA_PAIRS);
 
   // ========== 衛星9層(RB_Broker balanced の確定パラメータ) ==========
@@ -85,6 +87,16 @@
     { id: "gu-pinbar", label: "GBPUSDpinbar", symbol: "GBP/USD", pair: "GBPUSD",
       kind: "pinbar", title: "ピンバー反転", noConflict: true,
       gate: "high", erThreshold: 0.229, wick: 0.6, closePos: 0.33, stopMult: 2.5, holdDays: 5, lot: 0.03 },
+  ];
+
+  // ========== v6 候補(記録のみ・建てない、2026-10-25) ==========
+  // FT5 実機で確認済みの v6(docs/history/16 §12)で足す EURUSD の層。v5 のフォワード中は実際には建てず、
+  // シグナルと仮想の成績だけを端末に貯める。SATELLITES とは別にしてあるので、v5 の判定・ロット・衝突ゲート・
+  // 保有状況・再生テストには一切入らない。
+  const SHADOW_LAYERS = [
+    { id: "eu-outside", label: "EURUSDoutside", symbol: "EUR/USD", pair: "EURUSD",
+      kind: "outside_cont", title: "アウトサイドデイ継続", noConflict: true,
+      gate: "low", erThreshold: 0.18, stopMult: 2.5, holdDays: 4, lot: 0.10, spreadPips: 0.3 },
   ];
 
   // ========== 衝突ゲート(RB_Broker_Conflict.dll の確定パラメータ、2026-09-11) ==========
@@ -873,6 +885,87 @@
     return added;
   }
 
+  // ---- v6 候補の記録(建てない)。key = 判定に使った足|層|向き ----
+  const LS_SHADOWLOG = "rbsignal_shadow_log_v1";
+
+  function loadShadowLog() {
+    try {
+      const raw = localStorage.getItem(LS_SHADOWLOG);
+      return raw ? JSON.parse(raw) : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function appendShadowLog(sig) {
+    if (!sig || !sig.direction || !sig.referenceDate) return 0;
+    const list = loadShadowLog();
+    const key = `${sig.referenceDate}|${sig.layer}|${sig.direction}`;
+    if (list.some((e) => e.key === key)) return 0;
+    list.push({ key, layer: sig.layer, symbol: sig.symbol, ref: sig.referenceDate, direction: sig.direction,
+      atr: sig.atr14, stopMult: sig.stopMult, holdDays: sig.holdDays, loggedAt: new Date().toISOString() });
+    try {
+      localStorage.setItem(LS_SHADOWLOG, JSON.stringify(list));
+    } catch (e) {
+      return -1;
+    }
+    return 1;
+  }
+
+  // 記録したシグナルを日足で仮想的に決済する(概算)。EA と同じく1層1本(保有中の新規は見送り)。
+  // 建て値 = 執行日の足の始値(実際は +90分の価格なので少しずれる)、損切り = 建て値 ∓ SM×ATR14(日足の高安で判定)、
+  // 時間切れ = 執行日から holdDays 本後の足の始値。損益は pips(通常スプレッドを引く)。
+  function evaluateShadowLog(entries, bars, cfg) {
+    const byDate = new Map(bars.map((b, i) => [b.date, i]));
+    const pip = cfg.symbol.endsWith("JPY") ? 0.01 : 0.0001;
+    const rows = [];
+    let busyUntil = null;
+    const sorted = entries.filter((e) => e.layer === cfg.id).sort((a, b) => (a.ref < b.ref ? -1 : 1));
+    for (const e of sorted) {
+      const exec = addTradingDays(e.ref, 1);
+      const row = { ref: e.ref, exec, direction: e.direction, status: "", pips: null, exitDate: null, entry: null };
+      if (busyUntil && exec <= busyUntil) {
+        row.status = "見送り(前の分を保有中)";
+        rows.push(row);
+        continue;
+      }
+      const k = byDate.get(exec);
+      if (k == null) {
+        row.status = "執行日の足待ち";
+        rows.push(row);
+        busyUntil = addTradingDays(exec, e.holdDays);
+        continue;
+      }
+      const side = e.direction === "long" ? 1 : -1;
+      const entry = bars[k].open;
+      const stop = entry - side * e.stopMult * e.atr;
+      row.entry = entry;
+      let exitPx = null;
+      for (let j = k; j < k + e.holdDays && j < bars.length; j++) {
+        if ((side > 0 && bars[j].low <= stop) || (side < 0 && bars[j].high >= stop)) {
+          exitPx = stop; row.exitDate = bars[j].date; row.status = "損切り";
+          break;
+        }
+      }
+      if (exitPx == null && k + e.holdDays < bars.length) {
+        exitPx = bars[k + e.holdDays].open; row.exitDate = bars[k + e.holdDays].date; row.status = "時間切れ";
+      }
+      if (exitPx == null) {
+        const last = bars[bars.length - 1];
+        row.status = "保有中";
+        row.pips = ((last.close - entry) * side) / pip;
+        busyUntil = addTradingDays(exec, e.holdDays);
+      } else {
+        row.pips = ((exitPx - entry) * side) / pip - (cfg.spreadPips || 0);
+        busyUntil = row.exitDate;
+      }
+      rows.push(row);
+    }
+    const done = rows.filter((r) => r.status === "損切り" || r.status === "時間切れ");
+    return { rows, closed: done.length, pips: done.reduce((a, r) => a + r.pips, 0),
+      wins: done.filter((r) => r.pips > 0).length };
+  }
+
   function saveSettings(s) {
     try {
       localStorage.setItem(LS_SETTINGS, JSON.stringify(s));
@@ -889,7 +982,7 @@
   // src:"shot" のまま保存する(スクショの値を人間が手で直したもの、という
   // 位置づけで、mergeBarSeries の優先度[shot>ft5>td]に自然に乗る)。
   const LS_BARHIST = "rb_bar_history_v1";
-  const SHOT_SYMBOLS = ["GBP/JPY", "GBP/USD", "USD/JPY", "AUD/JPY", "EUR/JPY"];
+  const SHOT_SYMBOLS = ["GBP/JPY", "GBP/USD", "USD/JPY", "AUD/JPY", "EUR/JPY", "EUR/USD"];   // EUR/USD は v6 候補の記録用
 
   function loadBarHistory() {
     try {
@@ -1475,7 +1568,9 @@
     const usdWeeks = officialWeeks(aggregateWeekly(barsBySymbol["USD/JPY"] || []));
     const newWeek = lastCompleteBarIsMonday(barsBySymbol["USD/JPY"] || []);
     const satellites = computeAllSatellites(barsBySymbol, er, erPrev, { "USD/JPY": usdWeeks }, newWeek);
-    return { core, er, erPrev, satellites };
+    // v6 候補(記録のみ)。v5 の satellites とは別に返す
+    const shadow = SHADOW_LAYERS.map((cfg) => computeSatelliteSignal(cfg, barsBySymbol && barsBySymbol[cfg.symbol], er));
+    return { core, er, erPrev, satellites, shadow };
   }
 
   // ========== コアのトランシェとロット(2026-09-29 app.js から移動) ==========
@@ -1749,6 +1844,11 @@
     LS_SIGNALLOG,
     loadSignalLog,
     appendSignalLog,
+    SHADOW_LAYERS,
+    LS_SHADOWLOG,
+    loadShadowLog,
+    appendShadowLog,
+    evaluateShadowLog,
     readFileAsDataUrl,
     downscaleImage,
     callClaudeJson,
