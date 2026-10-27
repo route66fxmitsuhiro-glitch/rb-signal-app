@@ -848,7 +848,7 @@ function renderSignals(results) {
   logShownSignals(container);
 }
 
-// v6 候補(EURUSD アウトサイド継続、FT5 実機で確認済み・docs/history/16 §12)。v5 のフォワード中は建てず、
+// v6 候補(EURUSD アウトサイド継続・GBPUSD 押し目・戻り型、FT5 実機で確認済み・docs/history/16 §12・§13)。v5 のフォワード中は建てず、
 // シグナルと日足からの仮想の成績だけを表示する(2026-10-25 ユーザー了承)。
 function renderShadowCard() {
   const sigs = state.shadow || [];
@@ -860,11 +860,13 @@ function renderShadowCard() {
   for (const sig of sigs) {
     const cfg = SignalCore.SHADOW_LAYERS.find((c) => c.id === sig.layer);
     h += `<div class="sat-block"><div class="sat-head"><span class="sat-name">${sig.label}</span>
-      <span class="sat-title">${sig.title}(EUR/USD)</span></div>`;
+      <span class="sat-title">${sig.title}(${sig.symbol})</span></div>`;
     if (sig.insufficientData) {
-      h += `<div class="pair-meta">データ不足(EUR/USD の確定バーが足りません。毎朝のスクショ取り込みで貯まります)</div>`;
+      h += `<div class="pair-meta">データ不足(${sig.symbol} の確定バーが足りません。毎朝のスクショ取り込みで貯まります)</div>`;
     } else {
-      const gateTxt = sig.gateReady
+      const gateTxt = sig.weeklyTrend !== undefined
+        ? `週足の流れ: ${sig.weeklyTrend > 0 ? "上昇(買いだけ)" : sig.weeklyTrend < 0 ? "下降(売りだけ)" : "判定できない(見送り)"}`
+        : sig.gateReady
         ? `ER ${sig.avgER.toFixed(3)}(${sig.erThreshold} 以下で有効 → ${sig.gateOpen ? "ゲート開" : "ゲート閉"})`
         : "ER の計算待ち";
       h += `<div class="pair-meta">${sig.direction
@@ -875,7 +877,7 @@ function renderShadowCard() {
     const ev = SignalCore.evaluateShadowLog(log, bars, cfg);
     if (ev.rows.length) {
       h += `<div class="pair-meta">決済 ${ev.closed}件 / 勝ち ${ev.wins}件 / 合計 <b>${ev.pips >= 0 ? "+" : ""}${ev.pips.toFixed(1)}pips</b>
-        (0.10ロットなら約 ${ev.pips >= 0 ? "+" : "−"}$${Math.abs(ev.pips).toFixed(0)})</div>
+        (${cfg.lot.toFixed(2)}ロットなら約 ${ev.pips >= 0 ? "+" : "−"}$${Math.abs(ev.pips * cfg.lot * 10).toFixed(0)})</div>
         <div style="overflow-x:auto;"><table class="tranche-table"><thead><tr><th>判定の足</th><th>方向</th><th>状態</th><th>pips</th></tr></thead><tbody>`;
       for (const r of ev.rows.slice(-10).reverse()) {
         h += `<tr><td>${fmtDay(r.ref)}</td><td>${r.direction === "long" ? "ロング" : "ショート"}</td>
@@ -888,7 +890,7 @@ function renderShadowCard() {
     }
     h += `<p class="section-note">損益は日足からの概算です(建て値 = 執行日の始値。実際は 7:30 の価格なので少しずれます)。
       損切り ${cfg.stopMult}×ATR14、${cfg.holdDays}営業日で時間切れ、スプレッド ${cfg.spreadPips}pips を差し引き。
-      バックテストの目安: 年8件前後、1件平均 +30pips 前後。</p></div>`;
+      バックテストの目安: ${cfg.btNote || "-"}。</p></div>`;
   }
   card.innerHTML = h;
   return card;

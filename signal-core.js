@@ -96,8 +96,32 @@
   const SHADOW_LAYERS = [
     { id: "eu-outside", label: "EURUSDoutside", symbol: "EUR/USD", pair: "EURUSD",
       kind: "outside_cont", title: "アウトサイドデイ継続", noConflict: true,
-      gate: "low", erThreshold: 0.18, stopMult: 2.5, holdDays: 4, lot: 0.10, spreadPips: 0.3 },
+      gate: "low", erThreshold: 0.18, stopMult: 2.5, holdDays: 4, lot: 0.10, spreadPips: 0.3,
+      btNote: "年8件前後、1件平均 +31pips 前後" },
+    // v6b(2026-10-27、FT5 実機で確認済み・docs/history/16 §13)。10日レンジの失敗ブレイクのフェードを、
+    // 週足の流れ(前日の週より前に終わった週の終値 vs 直近20週の終値平均)と同じ向きのときだけ。ERゲートなし。
+    { id: "gu-pullback", label: "GBPUSDpullback", symbol: "GBP/USD", pair: "GBPUSD",
+      kind: "range_fade", title: "押し目・戻り型レンジフェード", noConflict: true,
+      gate: "none", lookback: 10, trendWeeks: 20, stopMult: 2.5, holdDays: 10, lot: 0.05, spreadPips: 1.0,
+      btNote: "年9件前後、1件平均 +34pips 前後" },
   ];
+
+  // 週足の流れ: refDate(判定に使った足)の週より前に終わった週の終値が、直近 weeks 週の終値平均より上なら +1、下なら −1。
+  // 週は月曜始まり(EA の WeekIndexOf と同じ。1970-01-01 は木曜なので +3 日ずらして月曜を週の頭にする)。足りなければ 0。
+  function weeklyTrendBefore(bars, refDate, weeks) {
+    const wk = (d) => Math.floor((Date.parse(d + "T00:00:00Z") / 86400000 + 3) / 7);
+    const cur = wk(refDate);
+    const closes = [];
+    let last = cur;
+    for (let i = bars.length - 1; i >= 0 && closes.length < weeks; i--) {
+      const w = wk(bars[i].date);
+      if (w >= cur) continue;
+      if (w !== last) { closes.push(bars[i].close); last = w; }   // 古い方へ進むので、その週で最初に出会う足が週の最後の足
+    }
+    if (closes.length < weeks) return 0;
+    const ma = closes.reduce((a, b) => a + b, 0) / weeks;
+    return closes[0] > ma ? 1 : closes[0] < ma ? -1 : 0;
+  }
 
   // ========== 衝突ゲート(RB_Broker_Conflict.dll の確定パラメータ、2026-09-11) ==========
   // EAの ConflictLotMult(sym, newSide) と同じ考え方。同一シンボル(cfg.pair)上で
@@ -1569,7 +1593,16 @@
     const newWeek = lastCompleteBarIsMonday(barsBySymbol["USD/JPY"] || []);
     const satellites = computeAllSatellites(barsBySymbol, er, erPrev, { "USD/JPY": usdWeeks }, newWeek);
     // v6 候補(記録のみ)。v5 の satellites とは別に返す
-    const shadow = SHADOW_LAYERS.map((cfg) => computeSatelliteSignal(cfg, barsBySymbol && barsBySymbol[cfg.symbol], er));
+    const shadow = SHADOW_LAYERS.map((cfg) => {
+      const bars = (barsBySymbol && barsBySymbol[cfg.symbol]) || [];
+      const sig = computeSatelliteSignal(cfg, bars, er);
+      if (cfg.trendWeeks && !sig.insufficientData) {
+        const t = weeklyTrendBefore(bars, sig.referenceDate, cfg.trendWeeks);
+        sig.weeklyTrend = t;
+        if (sig.direction && (sig.direction === "long" ? 1 : -1) !== t) sig.direction = null;   // 流れと逆向き・判定不可は見送り
+      }
+      return sig;
+    });
     return { core, er, erPrev, satellites, shadow };
   }
 
@@ -1845,6 +1878,7 @@
     loadSignalLog,
     appendSignalLog,
     SHADOW_LAYERS,
+    weeklyTrendBefore,
     LS_SHADOWLOG,
     loadShadowLog,
     appendShadowLog,
