@@ -1820,10 +1820,17 @@ function confirmEntry() {
 }
 
 function manualAddPosition() {
-  const symbol = prompt("通貨ペア(GBP/JPY, GBP/USD, USD/JPY のいずれか):", "GBP/JPY");
+  const satSymbols = [...new Set(SATELLITES.map((c) => c.symbol))];
+  const allSymbols = [...new Set([...PAIRS.map((p) => p.symbol), ...satSymbols])];
+  const symbol = prompt(`通貨ペア(${allSymbols.join(", ")} のいずれか):`, "GBP/JPY");
   if (!symbol) return;
-  const pairInfo = PAIRS.find((p) => p.symbol.toLowerCase() === symbol.trim().toLowerCase());
-  if (!pairInfo) { alert("対応していない通貨ペアです"); return; }
+  const sym = symbol.trim().toUpperCase().replace(/^([A-Z]{3})([A-Z]{3})$/, "$1/$2");
+  const pairInfo = PAIRS.find((p) => p.symbol.toUpperCase() === sym);
+  const satCfgs = SATELLITES.filter((c) => c.symbol.toUpperCase() === sym);
+  if (!pairInfo && !satCfgs.length) { alert("対応していない通貨ペアです"); return; }
+  // コアのペアで衛星の層もある場合は、どちらを追加するか選ぶ(EUR/JPY・AUD/JPY は衛星だけ)
+  const isSat = !pairInfo || (satCfgs.length && !confirm("コア(日足・週足)なら「OK」、衛星の層なら「キャンセル」を押してください"));
+  if (isSat) { manualAddSatellite(satCfgs); return; }
   const timeframe = confirm("日足なら「OK」、週足なら「キャンセル」を押してください") ? "daily" : "weekly";
   const direction = confirm("ロングなら「OK」、ショートなら「キャンセル」を押してください") ? "long" : "short";
   const price = parseFloat(prompt("約定価格:", ""));
@@ -1842,6 +1849,39 @@ function manualAddPosition() {
   state.positions.push(rec);
   savePositions(state.positions);
   refreshAfterPositionChange(state.lastFetch);
+}
+
+// 衛星の層の建玉を手動で追加する(記録ボタンを押し忘れたとき用)。ロット・逆指値・時間切れ予定日は
+// 記録ボタンと同じ buildSatelliteRecord で作る(衝突ゲートも同じ判定)。
+function manualAddSatellite(cfgs) {
+  let cfg = cfgs[0];
+  if (cfgs.length > 1) {
+    const list = cfgs.map((c, i) => `${i + 1}: ${c.label}(${c.title})`).join("\n");
+    const n = parseInt(prompt(`層を番号で選んでください:\n${list}`, "1"), 10);
+    if (!(n >= 1 && n <= cfgs.length)) { alert("番号が不正です"); return; }
+    cfg = cfgs[n - 1];
+  }
+  const direction = confirm(`${cfg.label}: ロングなら「OK」、ショートなら「キャンセル」を押してください`) ? "long" : "short";
+  const price = parseFloat(prompt("約定価格:", ""));
+  const atr = parseFloat(prompt("エントリー時のATR14(逆指値 = 約定価格 ∓ " + cfg.stopMult + "×ATR14):", ""));
+  if (!price || !atr) { alert("入力が不正です"); return; }
+  const dateIn = prompt("エントリー日(YYYY-MM-DD)。今日なら空欄のまま:", "");
+  if (dateIn === null) return;
+  const entryDate = dateIn.trim();
+  if (entryDate && !/^\d{4}-\d{2}-\d{2}$/.test(entryDate)) { alert("日付は YYYY-MM-DD で入力してください"); return; }
+  const scale = lotScaleFactor(state.settings);
+  const sig = { ...cfg, layer: cfg.id, direction, atr14: atr };
+  const rec = buildSatelliteRecord(sig, price, scale);
+  if (entryDate) {
+    rec.entryDate = entryDate;
+    rec.exitDate = SignalCore.scheduledExitDate(cfg, entryDate);
+  }
+  rec.scaleAtEntry = scale;
+  rec.usdJpyAtEntry = effectiveUsdJpy(state.settings);
+  state.positions.push(rec);
+  savePositions(state.positions);
+  refreshAfterPositionChange(state.lastFetch);
+  alert(`${cfg.label} を記録しました(ロット ${rec.tranches[0].lot}、逆指値 ${rec.fixedStop.toFixed(cfg.symbol.endsWith("JPY") ? 3 : 5)}、時間切れ予定 ${rec.exitDate})。`);
 }
 
 // ========== ブローカーのレート一覧スクショから日足を取り込む ==========
