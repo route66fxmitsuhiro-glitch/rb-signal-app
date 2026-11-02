@@ -1021,6 +1021,7 @@ function renderPositions(freshDataBySymbol) {
   const openPositions = state.positions.filter((p) =>
     p.tranches.some((t) => !t.closed) || p.tranches.some((t) => t.closed && t.exitDate === today));
   empty.classList.toggle("hidden", openPositions.length > 0);
+  const stopPending = [];
 
   for (const pos of openPositions) {
     // 分散レイヤー(衛星9層)はコアと形が違うので専用カードで描画する。
@@ -1050,6 +1051,9 @@ function renderPositions(freshDataBySymbol) {
     // 上書き中も自動計算値は併記し、いつでも解除できるようにする。
     const hasOverride = pos.exitOverride != null;
     const exit = hasOverride ? { price: pos.exitOverride, source: "手動設定" } : autoExit;
+    if (exit.price != null && pos.tranches.some((t) => !t.closed) && !(pos.orderCheck && pos.orderCheck[stopKey(pos, exit.price)])) {
+      stopPending.push(`${pos.pairLabel} ${pos.timeframe === "daily" ? "日足" : "週足"}${pos.direction === "long" ? "ロング" : "ショート"} → ${fmtPrice(exit.price, pos.symbol)}`);
+    }
 
     const card = document.createElement("div");
     card.className = "pair-card";
@@ -1066,6 +1070,7 @@ function renderPositions(freshDataBySymbol) {
         <button class="btn btn-ghost btn-small edit-exit" data-pos="${pos.id}">編集</button>
         ${hasOverride ? `<button class="btn btn-ghost btn-small clear-exit-override" data-pos="${pos.id}">自動に戻す</button>` : ""}
       </div>
+      ${stopStatusHtml(pos, exit)}
       ${
         hasOverride && autoExit.price != null
           ? `<div class="pair-meta section-note">自動計算値(参考): ${fmtPrice(autoExit.price, pos.symbol)}(${autoExit.source})</div>`
@@ -1162,6 +1167,22 @@ function renderPositions(freshDataBySymbol) {
       refreshAfterPositionChange(freshDataBySymbol);
     });
   });
+  if (stopPending.length) {
+    container.insertAdjacentHTML("afterbegin", `<div class="stop-pending">
+      <div class="stop-pending-title">逆指値の更新が必要 ${stopPending.length}件</div>
+      <ul>${stopPending.map((x) => `<li>${x}</li>`).join("")}</ul>
+      <div class="section-note">ブローカーで変更したら、各カードの「変更した」を押してください。</div>
+    </div>`);
+  }
+  container.querySelectorAll(".stop-done").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const pos = state.positions.find((p) => p.id === btn.dataset.pos);
+      if (!pos) return;
+      markStopConfirmed(pos, btn.dataset.key);
+      savePositions(state.positions);
+      refreshAfterPositionChange(freshDataBySymbol);
+    });
+  });
   container.querySelectorAll(".edit-exit").forEach((btn) => {
     btn.addEventListener("click", () => {
       const pos = state.positions.find((p) => p.id === btn.dataset.pos);
@@ -1191,6 +1212,40 @@ function renderPositions(freshDataBySymbol) {
   });
 
   renderOrderCheck();
+}
+
+// ========== 逆指値(撤退ライン)の更新確認 ==========
+// 撤退ラインは日足なら毎日動く。確認のキーに価格を含めるので、ラインが動くと自動で「未確認」に戻る(2026-11-02 ユーザー要望)。
+function stopKey(pos, price) {
+  return price != null ? `stop@${fmtPrice(price, pos.symbol)}` : "stop";
+}
+
+// 逆指値をその価格で確認した印を付ける(古い価格の印は消し、前回の確認として残す)
+function markStopConfirmed(pos, key) {
+  if (!key.startsWith("stop@")) return;
+  if (!pos.orderCheck) pos.orderCheck = {};
+  for (const k of Object.keys(pos.orderCheck)) if (k.startsWith("stop@") && k !== key) delete pos.orderCheck[k];
+  pos.orderCheck[key] = true;
+  pos.stopConfirmed = { price: parseFloat(key.slice(5)), at: todayStr() };
+}
+
+function stopStatusHtml(pos, exit) {
+  if (exit.price == null || !pos.tranches.some((t) => !t.closed)) return "";
+  const key = stopKey(pos, exit.price);
+  const price = fmtPrice(exit.price, pos.symbol);
+  if (pos.orderCheck && pos.orderCheck[key]) {
+    return `<div class="stop-status ok">✓ 逆指値は <strong>${price}</strong> で確認済み(${pos.stopConfirmed ? pos.stopConfirmed.at : ""})。今日は変更不要です。</div>`;
+  }
+  const prev = pos.stopConfirmed;
+  const pip = pos.symbol.endsWith("JPY") ? 0.01 : 0.0001;
+  const was = prev
+    ? `前回確認 ${fmtPrice(prev.price, pos.symbol)}(${prev.at})→ ${Math.abs((exit.price - prev.price) / pip).toFixed(1)}pips ${exit.price > prev.price ? "上へ" : "下へ"}`
+    : "まだ一度も確認していません";
+  return `<div class="stop-status warn">
+      <div><strong>要更新</strong>: ブローカーの逆指値(全建玉)を <strong class="stop-price">${price}</strong> に変更してください</div>
+      <div class="stop-was">${was}</div>
+      <button class="btn btn-small stop-done" data-pos="${pos.id}" data-key="${key}">${price} に変更した</button>
+    </div>`;
 }
 
 // ========== 注文チェック ==========
@@ -1269,7 +1324,7 @@ function orderCheckItems(pos) {
   }
 
   items.push({
-    key: "stop",
+    key: stopKey(pos, exit.price),
     checkable: true,
     label: exit.price != null
       ? `撤退ライン @ ${fmtPrice(exit.price, pos.symbol)}(${exit.source})。逆指値を置くなら全建玉に。毎日ずれるので置いたら翌朝に更新。`
@@ -1381,7 +1436,8 @@ function renderOrderCheck() {
       const pos = state.positions.find((p) => p.id === cb.dataset.pos);
       if (!pos) return;
       if (!pos.orderCheck) pos.orderCheck = {};
-      if (cb.checked) pos.orderCheck[cb.dataset.key] = true;
+      if (cb.checked && cb.dataset.key.startsWith("stop@")) markStopConfirmed(pos, cb.dataset.key);
+      else if (cb.checked) pos.orderCheck[cb.dataset.key] = true;
       else delete pos.orderCheck[cb.dataset.key];
       savePositions(state.positions);
       renderOrderCheck();
@@ -1393,6 +1449,7 @@ function renderOrderCheck() {
       if (!pos) return;
       pos.orderCheck = {};
       for (const it of orderCheckItems(pos)) if (it.checkable) pos.orderCheck[it.key] = true;
+      for (const it of orderCheckItems(pos)) if (it.key.startsWith("stop@")) markStopConfirmed(pos, it.key);
       savePositions(state.positions);
       renderOrderCheck();
     });
@@ -1692,7 +1749,8 @@ async function runAiOrderCheck() {
       pos.orderCheckAi = byPos[pos.id] || {};
       if (!pos.orderCheck) pos.orderCheck = {};
       for (const [k, v] of Object.entries(pos.orderCheckAi)) {
-        if (v.verdict === "match") pos.orderCheck[k] = true;
+        if (v.verdict === "match" && k.startsWith("stop@")) markStopConfirmed(pos, k);
+        else if (v.verdict === "match") pos.orderCheck[k] = true;
       }
     }
     state.orderCheckAiMeta = {

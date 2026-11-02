@@ -706,3 +706,14 @@ h2 {
   font-weight: 700;
 }
 .record-entry-row { margin: 6px 0 8px; }
+
+/* 逆指値(撤退ライン)の更新確認(v80) */
+.stop-status { margin: 8px 0; padding: 8px 10px; border-radius: 8px; font-size: 0.9rem; display: grid; gap: 6px; }
+.stop-status.ok { background: var(--positive-soft); color: var(--positive); }
+.stop-status.warn { background: var(--accent-soft); color: var(--text); border: 2px solid var(--accent); }
+.stop-status .stop-price { font-size: 1.15rem; }
+.stop-status .stop-was { font-size: 0.8rem; color: var(--text-dim); }
+.stop-status .stop-done { justify-self: start; }
+.stop-pending { border: 2px solid var(--accent); background: var(--accent-soft); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
+.stop-pending-title { font-weight: 800; margin-bottom: 4px; }
+.stop-pending ul { margin: 0 0 4px; padding-left: 1.2em; }
