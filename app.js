@@ -2070,7 +2070,7 @@ function renderShotReview(rows, session) {
   const el = document.getElementById("rateShotReview");
   if (!el) return;
   const stateLabel = {
-    ok: '<span class="badge long">○ 使えます(セッション終了10分前)</span>',
+    ok: '<span class="badge long">○ 使えます(日足確定の直前)</span>',
     frozen: '<span class="badge long">◎ 使えます(市場が閉じていて確定値)</span>',
     early: '<span class="badge warn">△ まだ値が動きます</span>',
     late: '<span class="badge short">× 撮影時刻が遅すぎます</span>',

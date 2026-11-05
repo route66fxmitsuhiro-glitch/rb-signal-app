@@ -1114,6 +1114,9 @@
     const hh = parseInt(get("hour"), 10);
     const mm = parseInt(get("minute"), 10);
     const jstDow = dowOf(jstDate); // 0=日, 1=月, ... 6=土
+    // 日足の区切り(NY17:00)の日本時間。夏 6時 / 冬 7時(2026-11-06、冬時間で 6:10 の撮影を「遅すぎ」と誤判定していた)
+    const bh = nextBarCloseJst(d) === "06:00" ? 6 : 7;
+    const close = `0${bh}:00`, from = `0${bh - 1}:30`;
     // ラベル = 撮影日の前日。土日をまたぐ場合は直前の金曜まで戻る
     // (セッションは月〜金の 06:00 にしか始まらないため)。
     const label = lastCapturableSessionLabel(d);
@@ -1122,30 +1125,30 @@
     // ユーザー確認済み: この間もレート一覧は金曜セッションの値を保持する。
     // よって週末はいつ撮っても金曜のバーが確定値で取れる(最も安全)。
     const frozen =
-      (jstDow === 6 && hh >= 6) || // 土曜 06:00以降
-      jstDow === 0 ||              // 日曜(終日)
-      (jstDow === 1 && hh < 6);    // 月曜 06:00前
+      (jstDow === 6 && hh >= bh) || // 土曜 06:00(冬07:00)以降
+      jstDow === 0 ||               // 日曜(終日)
+      (jstDow === 1 && hh < bh);    // 月曜 06:00(冬07:00)前
     if (frozen) {
       return {
         label: label, jstDate: jstDate, state: "frozen",
         note: "市場が閉じており、画面は金曜セッションの確定値のまま止まっています。" +
-          "週末のうちに撮ったものなら、月曜 06:00 までいつアップしても構いません。",
+          `週末のうちに撮ったものなら、月曜 ${close} までいつアップしても構いません。`,
       };
     }
 
     // 【市場が開いている時間帯】06:00 を過ぎると H:/L: が今日のセッションに
     // リセットされ、閉じたバーの高安を復元できなくなる。
-    if (hh >= 6) {
+    if (hh >= bh) {
       return {
         label: label, jstDate: jstDate, state: "late",
-        note: "撮影時刻が JST 06:00 より後です。H:/L: は進行中セッションのもので、" +
-          "直前バーの高安ではありません。明朝 05:30〜06:00 に撮り直してください。",
+        note: `撮影時刻が JST ${close} より後です。H:/L: は進行中セッションのもので、` +
+          `直前バーの高安ではありません。明朝 ${from}〜${close} に撮り直してください。`,
       };
     }
-    if (hh < 5 || (hh === 5 && mm < 30)) {
+    if (hh < bh - 1 || (hh === bh - 1 && mm < 30)) {
       return {
         label: label, jstDate: jstDate, state: "early",
-        note: "JST 05:30 より前です。バーの残り時間が長く、高安・終値がまだ動きます。",
+        note: `JST ${from} より前です。バーの残り時間が長く、高安・終値がまだ動きます。`,
       };
     }
     return { label: label, jstDate: jstDate, state: "ok", note: "" };
